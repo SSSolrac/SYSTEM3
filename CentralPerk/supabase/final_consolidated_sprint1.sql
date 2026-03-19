@@ -131,60 +131,6 @@ create table if not exists public.member_feedback (
   constraint member_feedback_comment_length_check check (char_length(comment) <= 500)
 );
 
-create table if not exists public.member_referrals (
-  id bigserial primary key,
-  referrer_member_id bigint not null references public.loyalty_members(id) on delete cascade,
-  referrer_code text not null,
-  referee_email text not null,
-  referee_email_normalized text generated always as (lower(trim(referee_email))) stored,
-  referee_member_id bigint references public.loyalty_members(id) on delete set null,
-  status text not null default 'pending',
-  bonus_awarded boolean not null default false,
-  referrer_bonus_txn_id bigint references public.loyalty_transactions(id) on delete set null,
-  referee_bonus_txn_id bigint references public.loyalty_transactions(id) on delete set null,
-  created_at timestamptz not null default now(),
-  converted_at timestamptz,
-  constraint member_referrals_status_check check (status in ('pending', 'joined'))
-);
-
-create table if not exists public.member_birthday_rewards (
-  id bigserial primary key,
-  member_id bigint not null references public.loyalty_members(id) on delete cascade,
-  reward_year integer not null,
-  tier_at_award text not null,
-  points_awarded integer not null,
-  voucher_code text not null,
-  voucher_expires_at date not null,
-  source text not null default 'auto',
-  created_at timestamptz not null default now(),
-  constraint member_birthday_rewards_points_check check (points_awarded in (100, 500, 1000))
-);
-
-alter table public.member_referrals
-  add column if not exists referrer_member_id bigint,
-  add column if not exists referrer_code text,
-  add column if not exists referee_email text,
-  add column if not exists referee_email_normalized text generated always as (lower(trim(referee_email))) stored;
-
-alter table public.member_referrals
-  add column if not exists referee_member_id bigint,
-  add column if not exists status text not null default 'pending',
-  add column if not exists bonus_awarded boolean not null default false,
-  add column if not exists referrer_bonus_txn_id bigint,
-  add column if not exists referee_bonus_txn_id bigint,
-  add column if not exists created_at timestamptz not null default now(),
-  add column if not exists converted_at timestamptz;
-
-alter table public.member_birthday_rewards
-  add column if not exists member_id bigint,
-  add column if not exists reward_year integer,
-  add column if not exists tier_at_award text,
-  add column if not exists points_awarded integer,
-  add column if not exists voucher_code text,
-  add column if not exists voucher_expires_at date,
-  add column if not exists source text not null default 'auto',
-  add column if not exists created_at timestamptz not null default now();
-
 create table if not exists public.loyalty_member_profile_audit (
   id bigserial primary key,
   member_id bigint references public.loyalty_members(id),
@@ -330,19 +276,6 @@ on public.notification_outbox (user_id, channel, created_at desc)
 where is_promotional = true;
 create index if not exists idx_member_feedback_created
 on public.member_feedback (created_at desc);
-create unique index if not exists idx_member_referrals_unique_referrer_email
-on public.member_referrals (referrer_member_id, referee_email_normalized);
-create unique index if not exists idx_member_referrals_unique_referee_member
-on public.member_referrals (referee_member_id)
-where referee_member_id is not null;
-create index if not exists idx_member_referrals_referrer_created
-on public.member_referrals (referrer_member_id, created_at desc);
-create index if not exists idx_member_referrals_status_created
-on public.member_referrals (status, created_at desc);
-create unique index if not exists idx_member_birthday_rewards_member_year
-on public.member_birthday_rewards (member_id, reward_year);
-create unique index if not exists idx_member_birthday_rewards_voucher_code
-on public.member_birthday_rewards (voucher_code);
 create index if not exists idx_member_login_activity_member_date
 on public.member_login_activity (member_id, login_at desc);
 create index if not exists idx_member_reengagement_actions_member_date
@@ -517,8 +450,6 @@ alter table public.loyalty_members enable row level security;
 alter table public.member_login_activity enable row level security;
 alter table public.member_reengagement_actions enable row level security;
 alter table public.member_feedback enable row level security;
-alter table public.member_referrals enable row level security;
-alter table public.member_birthday_rewards enable row level security;
 
 drop policy if exists loyalty_members_select_own on public.loyalty_members;
 create policy loyalty_members_select_own
@@ -633,82 +564,6 @@ with check (
       and lower(m.email) = lower(public.app_current_email())
   )
 );
-
-drop policy if exists member_referrals_select on public.member_referrals;
-create policy member_referrals_select
-on public.member_referrals
-for select
-to authenticated
-using (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where (m.id = member_referrals.referrer_member_id or m.id = member_referrals.referee_member_id)
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_referrals_insert on public.member_referrals;
-create policy member_referrals_insert
-on public.member_referrals
-for insert
-to authenticated
-with check (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where m.id = member_referrals.referrer_member_id
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_referrals_update on public.member_referrals;
-create policy member_referrals_update
-on public.member_referrals
-for update
-to authenticated
-using (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where (m.id = member_referrals.referrer_member_id or m.id = member_referrals.referee_member_id)
-      and lower(m.email) = lower(public.app_current_email())
-  )
-)
-with check (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where (m.id = member_referrals.referrer_member_id or m.id = member_referrals.referee_member_id)
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_birthday_rewards_select on public.member_birthday_rewards;
-create policy member_birthday_rewards_select
-on public.member_birthday_rewards
-for select
-to authenticated
-using (
-  public.app_is_admin()
-  or exists (
-    select 1
-    from public.loyalty_members m
-    where m.id = member_birthday_rewards.member_id
-      and lower(m.email) = lower(public.app_current_email())
-  )
-);
-
-drop policy if exists member_birthday_rewards_insert_admin on public.member_birthday_rewards;
-create policy member_birthday_rewards_insert_admin
-on public.member_birthday_rewards
-for insert
-to authenticated
-with check (public.app_is_admin());
 
 drop policy if exists profile_photos_read on storage.objects;
 create policy profile_photos_read
