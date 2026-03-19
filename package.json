@@ -1,0 +1,13 @@
+{
+  "name": "centralperk-workspace",
+  "private": true,
+  "scripts": {
+    "install:app": "npm --prefix ./CentralPerk install",
+    "dev": "npm --prefix ./CentralPerk run dev",
+    "build": "npm --prefix ./CentralPerk run build",
+    "preview": "npm --prefix ./CentralPerk run preview",
+    "server": "npm --prefix ./CentralPerk run server",
+    "start": "npm --prefix ./CentralPerk run start",
+    "postinstall": "npm run install:app"
+  }
+}
