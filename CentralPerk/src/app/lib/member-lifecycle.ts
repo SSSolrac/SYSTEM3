@@ -1,5 +1,4 @@
 import { supabase } from "../../utils/supabase/client";
-import type { Member } from "../admin-panel/types";
 import type { MemberData } from "../types/loyalty";
 
 const STORAGE_KEYS = {
@@ -66,23 +65,6 @@ function saveJson<T>(key: string, data: T) {
   const win = safeWindow();
   if (!win) return;
   win.localStorage.setItem(key, JSON.stringify(data));
-}
-
-function daysSince(value?: string | null) {
-  if (!value) return Number.POSITIVE_INFINITY;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return Number.POSITIVE_INFINITY;
-  return Math.floor((Date.now() - date.getTime()) / (24 * 60 * 60 * 1000));
-}
-
-export function deriveAutoSegment(member: Member, lastActivityDate?: string | null): MemberSegment {
-  const balance = Number(member.points_balance || 0);
-  const inactiveDays = daysSince(lastActivityDate ?? member.enrollment_date);
-  const tier = String(member.tier || "Bronze").toLowerCase();
-  if (balance >= 2500 || (tier === "gold" && balance >= 1200)) return "High Value";
-  if (inactiveDays <= 30) return "Active";
-  if (inactiveDays <= 90) return "At Risk";
-  return "Inactive";
 }
 
 function normalizeManualSegment(value: string): MemberSegment | null {

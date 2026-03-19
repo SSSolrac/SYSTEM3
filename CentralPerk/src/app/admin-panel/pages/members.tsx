@@ -105,8 +105,8 @@ export default function AdminMembersPage() {
   const handleManualSegmentSave = async (memberNumber: string, memberId: string, value: string) => {
     try {
       const saved = await saveManualSegment(memberNumber, value);
-      setManualSegmentDraft((prev) => ({ ...prev, [memberId]: saved }));
       await refetch();
+      setManualSegmentDraft((prev) => ({ ...prev, [memberId]: saved }));
       toast.success("Manual segment saved.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save manual segment.");
