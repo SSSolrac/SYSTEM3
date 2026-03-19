@@ -26,7 +26,7 @@ import {
   type SurveyQuestion,
   type WinBackOfferType,
 } from "../../lib/member-engagement";
-import { loadFeedback, type FeedbackRecord } from "../../lib/member-lifecycle";
+import { loadAllReferrals, loadFeedback, type FeedbackRecord, type ReferralRecord } from "../../lib/member-lifecycle";
 
 const tabs = [
   { id: "notifications", label: "Push Notifications", icon: BellRing },
@@ -71,16 +71,39 @@ export default function AdminEngagementPage() {
   const [winBackOffer, setWinBackOffer] = useState<WinBackOfferType>("2x Points");
   const [winBackValue, setWinBackValue] = useState("2x points on next purchase");
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
+  const [referralItems, setReferralItems] = useState<ReferralRecord[]>([]);
 
   useEffect(() => {
     saveEngagementState(state);
   }, [state]);
 
   useEffect(() => {
+    let alive = true;
     loadFeedback()
-      .then(setFeedbackItems)
-      .catch(() => setFeedbackItems([]));
+      .then((items) => {
+        if (alive) setFeedbackItems(items);
+      })
+      .catch(() => {
+        if (alive) setFeedbackItems([]);
+      });
+    return () => {
+      alive = false;
+    };
   }, [state.surveys.length, state.notificationCampaigns.length]);
+
+  useEffect(() => {
+    let alive = true;
+    loadAllReferrals()
+      .then((items) => {
+        if (alive) setReferralItems(items);
+      })
+      .catch(() => {
+        if (alive) setReferralItems([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const inactiveMembers = useMemo(
     () => buildInactiveMemberInsights(members, transactions, loginActivity),
