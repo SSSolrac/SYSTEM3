@@ -308,7 +308,6 @@ export function RegistrationCard() {
 
     let authSignupLikelyCompleted = false;
     let authUserAlreadyExisted = false;
-    let attemptedProfileRecoveryAfterRateLimit = false;
     let memberProfileCreatedOrRepaired = false;
     let normalizedEmail = '';
 
@@ -355,23 +354,14 @@ export function RegistrationCard() {
       });
 
       if (signUpError) {
-        const shouldAttemptRecovery = shouldAttemptProfileRecoveryAfterSignupError(signUpError, duplicatePrecheckResult);
-        const rateLimitedSignup = isRateLimitError(signUpError);
-
-        if (rateLimitedSignup) {
-          setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
-        }
-
-        if (!shouldAttemptRecovery) {
-          throw signUpError;
-        }
-
-        authSignupLikelyCompleted = true;
         if (isAlreadyExistsAuthError(signUpError)) {
+          authSignupLikelyCompleted = true;
           authUserAlreadyExisted = true;
-        }
-        if (rateLimitedSignup) {
-          attemptedProfileRecoveryAfterRateLimit = true;
+        } else if (isRateLimitError(signUpError)) {
+          setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
+          throw signUpError;
+        } else {
+          throw signUpError;
         }
       } else {
         authSignupLikelyCompleted = true;
@@ -416,9 +406,6 @@ export function RegistrationCard() {
       if (authUserAlreadyExisted) {
         successMessage =
           'Your account already existed, and we completed your member profile setup. Please sign in with your existing account credentials.';
-      } else if (attemptedProfileRecoveryAfterRateLimit) {
-        successMessage =
-          'We hit a temporary signup limit, but your account likely already existed and we completed your member profile setup. Please sign in with your existing account credentials.';
       }
 
       // Update state with new member data
@@ -459,7 +446,7 @@ export function RegistrationCard() {
       }
 
       const baseErrorMessage = buildReadableErrorMessage(error);
-      if ((authUserAlreadyExisted || attemptedProfileRecoveryAfterRateLimit) && !memberProfileCreatedOrRepaired) {
+      if (authUserAlreadyExisted && !memberProfileCreatedOrRepaired) {
         setMessage({
           type: 'error',
           text: EXISTING_AUTH_RECOVERY_FAILURE_NOTICE,
