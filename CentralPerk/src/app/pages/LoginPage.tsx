@@ -94,7 +94,7 @@ export function LoginPage() {
         }
       } else {
         const mappedError = mapAuthErrorToMessage(err);
-        if (mappedError.includes('Invalid email or password') && !isDemoEmail(email)) {
+        if (mappedError.includes('Invalid email or password')) {
           const hasMatchingProfile = await profileExistsForEmail(normalizeEmail(email));
           setError(
             hasMatchingProfile

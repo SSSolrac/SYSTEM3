@@ -2,6 +2,7 @@ import { supabase } from "../../utils/supabase/client";
 import { setStoredCustomerSession } from "./auth";
 
 const DEMO_ACCOUNTS_KEY = "loyaltyhub-demo-accounts-v1";
+const DEV_AUTH_ENABLED = import.meta.env.DEV;
 const MIN_PASSWORD_LENGTH = 8;
 const DEMO_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -297,8 +298,8 @@ export async function registerCustomer(input: RegisterCustomerInput): Promise<Re
     throw new AuthFlowError("DUPLICATE_PHONE", "This phone number is already registered.");
   }
 
-  if (isDemoEmail(normalizedEmail)) {
-    console.log("DEMO AUTH USED", normalizedEmail);
+  const canUseDemoAuth = DEV_AUTH_ENABLED && isDemoEmail(normalizedEmail);
+  if (canUseDemoAuth) {
     const demoAccounts = loadDemoAccounts();
     const duplicateDemo = demoAccounts.find((entry) => entry.email === normalizedEmail);
     if (duplicateDemo) {
@@ -388,8 +389,7 @@ export async function registerCustomer(input: RegisterCustomerInput): Promise<Re
 
 export async function loginCustomer(input: { email: string; password: string; role: "customer" | "admin" }): Promise<LoginCustomerResult> {
   const normalizedEmail = normalizeEmail(input.email);
-  if (input.role === "customer" && isDemoEmail(normalizedEmail)) {
-    console.log("DEMO AUTH USED", normalizedEmail);
+  if (input.role === "customer" && DEV_AUTH_ENABLED && isDemoEmail(normalizedEmail)) {
     const demoAccount = loadDemoAccounts().find((entry) => entry.email === normalizedEmail);
     if (demoAccount) {
       const incomingHash = await hashSecret(input.password);
@@ -405,8 +405,6 @@ export async function loginCustomer(input: { email: string; password: string; ro
       });
       return { authMode: "demo", accessToken: "demo-customer-session", userId: demoAccount.memberId };
     }
-
-    throw new AuthFlowError("INVALID_CREDENTIALS", "Invalid email or password.");
   }
 
   const authEmail = input.role === "admin" ? `${input.email.trim()}@admin.loyaltyhub.com` : normalizedEmail;
