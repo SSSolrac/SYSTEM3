@@ -1,5 +1,6 @@
 import { supabase } from "../../utils/supabase/client";
 import type { EarnOpportunity, MemberData, Reward, Transaction } from "../types/loyalty";
+import { getCurrentCustomerSession } from "../auth/auth";
 import {
   DEFAULT_TIER_RULES,
   monthKey,
@@ -428,6 +429,19 @@ export async function findMember(memberIdentifier?: string, fallbackEmail?: stri
   }
 
   if (!lookup.data) {
+    const localSession = getCurrentCustomerSession();
+    const localEmail = localSession?.email?.trim();
+    if (localEmail && localEmail.toLowerCase() !== normalizedFallbackEmail?.toLowerCase()) {
+      lookup = await supabase
+        .from("loyalty_members")
+        .select("*")
+        .ilike("email", localEmail)
+        .limit(1)
+        .maybeSingle();
+    }
+  }
+
+  if (!lookup.data) {
     const authRes = await supabase.auth.getUser();
     const authEmail = authRes.data.user?.email?.trim();
     if (authEmail && authEmail.toLowerCase() !== normalizedFallbackEmail?.toLowerCase()) {
@@ -445,19 +459,20 @@ export async function findMember(memberIdentifier?: string, fallbackEmail?: stri
 }
 
 export async function loadMemberSnapshot(currentUser: MemberData): Promise<Partial<MemberData> | null> {
+  const localSession = getCurrentCustomerSession();
   const authRes = await supabase.auth.getUser();
-  const authEmail = String(authRes.data.user?.email || "").trim().toLowerCase();
+  const authEmail = String(authRes.data.user?.email || localSession?.email || "").trim().toLowerCase();
   const authUser = authRes.data.user;
   const member = authEmail
     ? await findMember(undefined, authEmail)
-    : await findMember(currentUser.memberId, currentUser.email);
+    : await findMember(localSession?.memberId || currentUser.memberId, localSession?.email || currentUser.email);
   if (!member) {
     const authFullName =
       String(authUser?.user_metadata?.full_name || authUser?.user_metadata?.name || "").trim() || currentUser.fullName;
 
     return {
-      fullName: authFullName || "Member",
-      email: String(authUser?.email || currentUser.email || ""),
+      fullName: authFullName || localSession?.fullName || "Member",
+      email: String(authUser?.email || localSession?.email || currentUser.email || ""),
     };
   }
 
@@ -716,9 +731,10 @@ export async function updateMemberProfile(input: {
   }
 
   const authRes = await supabase.auth.getUser();
-  if (authRes.error) throw authRes.error;
+  const localSession = getCurrentCustomerSession();
+  if (authRes.error && !localSession?.email) throw authRes.error;
 
-  const authEmail = authRes.data.user?.email;
+  const authEmail = authRes.data.user?.email || localSession?.email;
   if (!authEmail) {
     throw new Error("Unable to update profile: no authenticated user email found.");
   }
@@ -731,7 +747,7 @@ export async function updateMemberProfile(input: {
   let pendingEmailVerification = false;
 
   if (emailChanged) {
-    if (DEMO_SKIP_AUTH_EMAIL_UPDATE) {
+    if (DEMO_SKIP_AUTH_EMAIL_UPDATE || !authRes.data.user) {
       // Demo mode:
       // update the profile table email only, and keep Supabase Auth email unchanged.
       // To restore real auth email updates, set DEMO_SKIP_AUTH_EMAIL_UPDATE to false.

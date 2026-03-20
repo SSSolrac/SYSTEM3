@@ -56,6 +56,10 @@ export function getStoredCustomerSession() {
   return loadCustomerSession();
 }
 
+export function getCurrentCustomerSession() {
+  return loadCustomerSession();
+}
+
 export function setStoredCustomerSession(session: Omit<CustomerSession, "role">) {
   const payload: CustomerSession = { role: "customer", ...session };
   localStorage.setItem(CUSTOMER_SESSION_KEY, JSON.stringify(payload));
