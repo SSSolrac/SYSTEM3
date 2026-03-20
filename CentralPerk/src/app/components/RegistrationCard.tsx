@@ -300,8 +300,31 @@ export function RegistrationCard() {
         if (isRateLimitError(signUpError)) {
           setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
         }
-        if (!isAuthAlreadyExistsError(signUpError)) {
-          throw signUpError;
+        throw signUpError;
+      }
+      authSignupLikelyCompleted = true;
+
+      // Insert member profile after auth signup (or profile-recovery flow).
+      const { data: newMember, error: insertError } = await supabase
+        .from('loyalty_members')
+        .insert([
+          {
+            first_name: formData.firstName,
+            last_name: formData.lastName,
+            email: normalizedEmail,
+            phone: normalizedPhone,
+            birthdate: formData.birthdate,
+            points_balance: 0,
+            tier: 'Bronze',
+          },
+        ])
+        .select()
+        .single();
+
+      if (insertError) {
+        const insertErrorText = extractErrorText(insertError).toLowerCase();
+        if (hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
+          throw new Error('A user with that email and phone number already exists.');
         }
         recoveredFromExistingAuthSignup = true;
       }
@@ -400,7 +423,7 @@ export function RegistrationCard() {
         : baseErrorMessage;
 
       setMessage({
-        type: 'error',
+        type: authSignupLikelyCompleted ? 'success' : 'error',
         text: safeRecoveryMessage,
       });
     } finally {
