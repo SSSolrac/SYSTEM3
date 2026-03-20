@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { ensureWelcomePackage } from '../lib/loyalty-supabase';
 import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
-import { isDemoEmail, mapAuthErrorToMessage, registerCustomer } from '../auth/customer-auth';
+import {
+  isCustomerDemoAuthEnabled,
+  isCustomerDemoAuthForced,
+  isDemoEmail,
+  mapAuthErrorToMessage,
+  registerCustomer,
+} from '../auth/customer-auth';
 import {
   AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT,
   EMAIL_CONFIRMATION_REQUIRED_MESSAGE,
@@ -27,6 +33,8 @@ const DEMO_AUTH_SUCCESS_MESSAGE =
   'Registration complete in Development Demo Auth mode. You are signed in without email confirmation.';
 
 export function RegistrationCard() {
+  const demoAuthEnabled = isCustomerDemoAuthEnabled();
+  const forceDemoAuth = isCustomerDemoAuthForced();
   const [formData, setFormData] = useState({
     firstName: '',
     lastName: '',
@@ -318,9 +326,19 @@ export function RegistrationCard() {
                   placeholder="your.email@example.com"
                   required
                 />
-                {formData.email && isDemoEmail(formData.email) && (
+                {demoAuthEnabled && forceDemoAuth && (
                   <p className="mt-2 text-xs text-[#1A2B47]">
-                    Development demo email detected. Registration will bypass Supabase email confirmation and sign you in locally.
+                    Demo auth is forced by configuration. Customer registration will stay local and bypass Supabase Auth.
+                  </p>
+                )}
+                {demoAuthEnabled && !forceDemoAuth && formData.email && isDemoEmail(formData.email) && (
+                  <p className="mt-2 text-xs text-[#1A2B47]">
+                    Demo email detected and demo auth is enabled. Registration will bypass Supabase email confirmation and sign you in locally.
+                  </p>
+                )}
+                {!demoAuthEnabled && formData.email && isDemoEmail(formData.email) && (
+                  <p className="mt-2 text-xs text-amber-700">
+                    Demo-style email detected, but demo auth is disabled by configuration. Registration will use Supabase Auth.
                   </p>
                 )}
               </div>
