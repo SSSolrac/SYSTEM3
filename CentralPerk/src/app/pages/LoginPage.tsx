@@ -4,9 +4,17 @@ import { supabase } from '../../utils/supabase/client';
 import { clearStoredAuth, getRoleFromSession } from '../auth/auth';
 import { trackMemberLoginActivity } from '../lib/loyalty-supabase';
 import { AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT } from '../auth/auth-config';
-import { isDemoEmail, loginCustomer, mapAuthErrorToMessage } from '../auth/customer-auth';
+import {
+  isCustomerDemoAuthEnabled,
+  isCustomerDemoAuthForced,
+  isDemoEmail,
+  loginCustomer,
+  mapAuthErrorToMessage,
+} from '../auth/customer-auth';
 
 export function LoginPage() {
+  const demoAuthEnabled = isCustomerDemoAuthEnabled();
+  const forceDemoAuth = isCustomerDemoAuthForced();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -212,9 +220,19 @@ export function LoginPage() {
                     placeholder={loginRole === 'admin' ? 'e.g., ADMIN0001' : 'your.email@example.com'}
                     required
                   />
-                  {loginRole === 'customer' && email && isDemoEmail(email) && (
+                  {loginRole === 'customer' && demoAuthEnabled && forceDemoAuth && (
                     <p className="mt-2 text-xs text-[#1A2B47]">
-                      Demo/test email detected. Login will use Development Demo Auth first if a demo account exists.
+                      Demo auth is forced by configuration. Customer login will stay local and skip Supabase Auth.
+                    </p>
+                  )}
+                  {loginRole === 'customer' && demoAuthEnabled && !forceDemoAuth && email && isDemoEmail(email) && (
+                    <p className="mt-2 text-xs text-[#1A2B47]">
+                      Demo/test email detected and demo auth is enabled. Login will use local demo auth only.
+                    </p>
+                  )}
+                  {loginRole === 'customer' && !demoAuthEnabled && email && isDemoEmail(email) && (
+                    <p className="mt-2 text-xs text-amber-700">
+                      Demo-style email detected, but demo auth is disabled by configuration. Login will use Supabase Auth.
                     </p>
                   )}
                 </div>
