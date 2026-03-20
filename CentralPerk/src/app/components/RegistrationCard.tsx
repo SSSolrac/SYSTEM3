@@ -21,11 +21,15 @@ interface Member {
 const AUTH_RATE_LIMIT_HINTS = ['over_email_send_rate_limit', 'rate limit', 'too many requests'];
 const AUTH_ALREADY_EXISTS_HINTS = ['user already registered', 'already registered', 'already exists', 'user exists'];
 const PROFILE_CONSTRAINT_HINTS = ['duplicate key', 'already exists', 'violates unique constraint'];
+
 const PARTIAL_SUCCESS_NOTICE =
   'Your account may already have been created. Please check your email for a confirmation link, or try signing in after confirming your email.';
+
 const EXISTING_AUTH_RECOVERY_FAILURE_NOTICE =
   'Your account may already exist, but profile setup is incomplete. Please try signing in or contact support.';
-const MEMBER_SELECT_COLUMNS = 'id,member_id,member_number,first_name,last_name,email,phone,birthdate,points_balance,enrollment_date';
+
+const MEMBER_SELECT_COLUMNS =
+  'id,member_id,member_number,first_name,last_name,email,phone,birthdate,points_balance,enrollment_date';
 
 interface MemberProfileInput {
   firstName: string;
@@ -40,6 +44,11 @@ interface MemberProfileResult {
   recoveredFromExistingAuthSignup: boolean;
 }
 
+interface DuplicatePrecheckResult {
+  emailExists: boolean;
+  phoneExists: boolean;
+}
+
 export function RegistrationCard() {
   const [formData, setFormData] = useState({
     firstName: '',
@@ -48,8 +57,12 @@ export function RegistrationCard() {
     phone: '',
     birthdate: '',
     password: '',
-    referralCode: typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("ref") || "" : "",
+    referralCode:
+      typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('ref') || ''
+        : '',
   });
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const submitLockRef = useRef(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -60,23 +73,19 @@ export function RegistrationCard() {
   const cooldownSecondsRemaining = cooldownUntilMs
     ? Math.max(0, Math.ceil((cooldownUntilMs - currentTimeMs) / 1000))
     : 0;
+
   const isCooldownActive = cooldownSecondsRemaining > 0;
 
   const getDuplicateMessage = (emailExists: boolean, phoneExists: boolean): string | null => {
-    if (emailExists && phoneExists) {
-      return 'A user with that email and phone number already exists.';
-    }
-    if (emailExists) {
-      return 'Duplicate email.';
-    }
-    if (phoneExists) {
-      return 'Duplicate number.';
-    }
+    if (emailExists && phoneExists) return 'A user with that email and phone number already exists.';
+    if (emailExists) return 'Duplicate email.';
+    if (phoneExists) return 'Duplicate number.';
     return null;
   };
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
     const storedCooldown = window.localStorage.getItem(REGISTRATION_COOLDOWN_STORAGE_KEY);
     if (!storedCooldown) return;
 
@@ -91,6 +100,7 @@ export function RegistrationCard() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
     if (cooldownUntilMs && cooldownUntilMs > Date.now()) {
       window.localStorage.setItem(REGISTRATION_COOLDOWN_STORAGE_KEY, String(cooldownUntilMs));
       return;
@@ -101,17 +111,19 @@ export function RegistrationCard() {
 
   useEffect(() => {
     if (!isCooldownActive) return;
+
     const intervalId = window.setInterval(() => {
       setCurrentTimeMs(Date.now());
     }, 1000);
+
     return () => window.clearInterval(intervalId);
   }, [isCooldownActive]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData({
-      ...formData,
+    setFormData((prev) => ({
+      ...prev,
       [e.target.name]: e.target.value,
-    });
+    }));
   };
 
   const extractErrorText = (rawError: unknown) => {
@@ -130,24 +142,71 @@ export function RegistrationCard() {
   };
 
   const hasAnyHint = (haystack: string, hints: string[]) =>
-    hints.some((hint) => haystack.toLowerCase().includes(hint));
+    hints.some((hint) => haystack.toLowerCase().includes(hint.toLowerCase()));
 
   const normalizePhoneNumber = (rawPhone: string) => {
-    const trimmed = rawPhone.trim();
-    if (!trimmed) return '';
-    const digitsOnly = trimmed.replace(/\D/g, '');
+    const digitsOnly = rawPhone.replace(/\D/g, '');
     if (!digitsOnly) return '';
-    return trimmed.startsWith('+') ? `+${digitsOnly}` : digitsOnly;
+
+    // Philippines-oriented normalization:
+    // 09171234567 -> +639171234567
+    // 639171234567 -> +639171234567
+    // +639171234567 -> +639171234567
+    if (digitsOnly.startsWith('63') && digitsOnly.length >= 12) {
+      return `+${digitsOnly}`;
+    }
+
+    if (digitsOnly.startsWith('0') && digitsOnly.length === 11) {
+      return `+63${digitsOnly.slice(1)}`;
+    }
+
+    if (digitsOnly.length === 10 && digitsOnly.startsWith('9')) {
+      return `+63${digitsOnly}`;
+    }
+
+    return `+${digitsOnly}`;
   };
 
   const isAlreadyExistsAuthError = (rawError: unknown) => {
     if (!rawError || typeof rawError !== 'object') return false;
+
     const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
     const normalizedText = extractErrorText(rawError).toLowerCase();
+
     return code.includes('already') || hasAnyHint(normalizedText, AUTH_ALREADY_EXISTS_HINTS);
   };
 
-  const createOrRepairMemberProfile = async (input: MemberProfileInput): Promise<MemberProfileResult> => {
+  const isRateLimitError = (rawError: unknown) => {
+    if (!rawError || typeof rawError !== 'object') return false;
+    if (isAlreadyExistsAuthError(rawError)) return false;
+
+    const status = 'status' in rawError ? Number(rawError.status) : NaN;
+    const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
+    const text = extractErrorText(rawError).toLowerCase();
+
+    return (
+      status === 429 ||
+      code.includes('over_email_send_rate_limit') ||
+      hasAnyHint(text, AUTH_RATE_LIMIT_HINTS)
+    );
+  };
+
+  const shouldAttemptProfileRecoveryAfterSignupError = (
+    signUpError: unknown,
+    duplicatePrecheckResult: DuplicatePrecheckResult
+  ) => {
+    if (isAlreadyExistsAuthError(signUpError)) return true;
+
+    // Safe 429 recovery only when no member exists yet for the email.
+    // This suggests auth may exist but loyalty_members is missing/incomplete.
+    if (isRateLimitError(signUpError) && !duplicatePrecheckResult.emailExists) return true;
+
+    return false;
+  };
+
+  const createOrRepairMemberProfile = async (
+    input: MemberProfileInput
+  ): Promise<MemberProfileResult> => {
     const { data: insertedMember, error: insertError } = await supabase
       .from('loyalty_members')
       .insert([
@@ -176,14 +235,24 @@ export function RegistrationCard() {
       throw new Error('PROFILE_CREATION_FAILED');
     }
 
-    const { data: existingMember, error: existingMemberError } = await supabase
+    const { data: existingMembers, error: existingMemberError } = await supabase
       .from('loyalty_members')
       .select(MEMBER_SELECT_COLUMNS)
       .or(`email.ilike.${input.email},phone.eq.${input.phone}`)
-      .limit(1)
-      .maybeSingle();
+      .limit(5);
 
-    if (existingMemberError || !existingMember) {
+    if (existingMemberError || !existingMembers || existingMembers.length === 0) {
+      throw new Error('PROFILE_CREATION_FAILED');
+    }
+
+    const existingMember =
+      existingMembers.find(
+        (member) =>
+          String(member.email ?? '').trim().toLowerCase() === input.email ||
+          normalizePhoneNumber(String(member.phone ?? '')) === input.phone
+      ) ?? existingMembers[0];
+
+    if (!existingMember) {
       throw new Error('PROFILE_CREATION_FAILED');
     }
 
@@ -220,15 +289,6 @@ export function RegistrationCard() {
       memberRecord: repairedMember,
       recoveredFromExistingAuthSignup: true,
     };
-  };
-
-  const isRateLimitError = (rawError: unknown) => {
-    if (!rawError || typeof rawError !== 'object') return false;
-    if (isAlreadyExistsAuthError(rawError)) return false;
-    const status = 'status' in rawError ? Number(rawError.status) : NaN;
-    const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
-    const text = extractErrorText(rawError).toLowerCase();
-    return status === 429 || code.includes('over_email_send_rate_limit') || hasAnyHint(text, AUTH_RATE_LIMIT_HINTS);
   };
 
   const buildReadableErrorMessage = (rawError: unknown) => {
@@ -273,7 +333,9 @@ export function RegistrationCard() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
     if (submitLockRef.current || isSubmitting) return;
+
     if (isCooldownActive) {
       setMessage({
         type: 'error',
@@ -281,6 +343,7 @@ export function RegistrationCard() {
       });
       return;
     }
+
     submitLockRef.current = true;
     setIsSubmitting(true);
     setMessage(null);
@@ -289,12 +352,12 @@ export function RegistrationCard() {
     let authSignupLikelyCompleted = false;
     let authUserAlreadyExisted = false;
     let memberProfileCreatedOrRepaired = false;
-    let normalizedEmail = '';
+    let attemptedProfileRecoveryAfterRateLimit = false;
 
     try {
-      normalizedEmail = formData.email.trim().toLowerCase();
+      const normalizedEmail = formData.email.trim().toLowerCase();
       const normalizedPhone = normalizePhoneNumber(formData.phone);
-      // Pre-check email and phone before auth signup to prevent duplicate registrations.
+
       const { data: existingMembers, error: existingMembersError } = await supabase
         .from('loyalty_members')
         .select('email, phone')
@@ -305,18 +368,23 @@ export function RegistrationCard() {
       }
 
       const emailExists = (existingMembers ?? []).some(
-        (member) => member.email?.trim().toLowerCase() === normalizedEmail
+        (member) => String(member.email ?? '').trim().toLowerCase() === normalizedEmail
       );
-      const phoneExists = (existingMembers ?? []).some(
-        (member) => normalizePhoneNumber(member.phone ?? '') === normalizedPhone
-      );
-      const duplicateMessage = getDuplicateMessage(emailExists, phoneExists);
 
+      const phoneExists = (existingMembers ?? []).some(
+        (member) => normalizePhoneNumber(String(member.phone ?? '')) === normalizedPhone
+      );
+
+      const duplicatePrecheckResult: DuplicatePrecheckResult = {
+        emailExists,
+        phoneExists,
+      };
+
+      const duplicateMessage = getDuplicateMessage(emailExists, phoneExists);
       if (duplicateMessage) {
         throw new Error(duplicateMessage);
       }
 
-      // Create auth user after pre-check succeeds.
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email: normalizedEmail,
         password: formData.password,
@@ -330,14 +398,28 @@ export function RegistrationCard() {
       });
 
       if (signUpError) {
-        if (isAlreadyExistsAuthError(signUpError)) {
-          authSignupLikelyCompleted = true;
-          authUserAlreadyExisted = true;
-        } else if (isRateLimitError(signUpError)) {
+        const rateLimitedSignup = isRateLimitError(signUpError);
+        const shouldAttemptRecovery = shouldAttemptProfileRecoveryAfterSignupError(
+          signUpError,
+          duplicatePrecheckResult
+        );
+
+        if (rateLimitedSignup) {
           setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
+        }
+
+        if (!shouldAttemptRecovery) {
           throw signUpError;
-        } else {
-          throw signUpError;
+        }
+
+        authSignupLikelyCompleted = true;
+
+        if (isAlreadyExistsAuthError(signUpError)) {
+          authUserAlreadyExisted = true;
+        }
+
+        if (rateLimitedSignup) {
+          attemptedProfileRecoveryAfterRateLimit = true;
         }
       } else {
         authSignupLikelyCompleted = true;
@@ -350,16 +432,29 @@ export function RegistrationCard() {
         phone: normalizedPhone,
         birthdate: formData.birthdate,
       });
+
       memberProfileCreatedOrRepaired = true;
 
-      const shouldConfirmEmail = authUserAlreadyExisted ? false : !signUpData?.session;
+      const shouldConfirmEmail = authUserAlreadyExisted
+        ? false
+        : attemptedProfileRecoveryAfterRateLimit
+          ? true
+          : !signUpData?.session;
+
       const successSuffix = shouldConfirmEmail
         ? 'Please check your email to confirm your account before logging in.'
         : 'You can now log in.';
+
       let successMessage = `Registration successful! Welcome to our loyalty program. ${successSuffix}`;
 
-      const welcomeResult = await ensureWelcomePackage(memberRecord.member_number, memberRecord.email);
-      const memberPointsBalance = Number(welcomeResult.newBalance ?? memberRecord.points_balance ?? 0);
+      const welcomeResult = await ensureWelcomePackage(
+        memberRecord.member_number,
+        memberRecord.email
+      );
+
+      const memberPointsBalance = Number(
+        welcomeResult.newBalance ?? memberRecord.points_balance ?? 0
+      );
 
       if (welcomeResult.granted) {
         successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
@@ -371,6 +466,7 @@ export function RegistrationCard() {
           refereeMemberId: String(memberRecord.member_number),
           refereeEmail: String(memberRecord.email),
         });
+
         if (!referral.applied) {
           successMessage = `${successMessage} Note: your referral code was invalid or not applicable.`;
         }
@@ -379,25 +475,27 @@ export function RegistrationCard() {
       if (recoveredFromExistingAuthSignup) {
         successMessage = `${successMessage} We also repaired an incomplete member profile from an earlier signup attempt.`;
       }
-      if (authUserAlreadyExisted) {
+
+      if (attemptedProfileRecoveryAfterRateLimit) {
+        successMessage =
+          'We hit a temporary signup limit, but your account likely already existed and we completed your member profile setup. Please check your email for a confirmation link, then sign in.';
+      } else if (authUserAlreadyExisted) {
         successMessage =
           'Your account already existed, and we completed your member profile setup. Please sign in with your existing account credentials.';
       }
 
-      // Update state with new member data
       setRegisteredMember({
         id: String(memberRecord.id ?? memberRecord.member_id ?? ''),
-        memberNumber: memberRecord.member_number,
-        firstName: memberRecord.first_name,
-        lastName: memberRecord.last_name,
-        email: memberRecord.email,
-        phone: memberRecord.phone,
-        birthdate: formData.birthdate,
+        memberNumber: String(memberRecord.member_number ?? ''),
+        firstName: String(memberRecord.first_name ?? ''),
+        lastName: String(memberRecord.last_name ?? ''),
+        email: String(memberRecord.email ?? normalizedEmail),
+        phone: String(memberRecord.phone ?? normalizedPhone),
+        birthdate: String(memberRecord.birthdate ?? formData.birthdate),
         currentPointsBalance: memberPointsBalance,
-        createdAt: memberRecord.enrollment_date,
+        createdAt: String(memberRecord.enrollment_date ?? ''),
       });
 
-      // Reset form
       setFormData({
         firstName: '',
         lastName: '',
@@ -422,13 +520,15 @@ export function RegistrationCard() {
       }
 
       const baseErrorMessage = buildReadableErrorMessage(error);
-      if (authUserAlreadyExisted && !memberProfileCreatedOrRepaired) {
+
+      if (authSignupLikelyCompleted && !memberProfileCreatedOrRepaired) {
         setMessage({
           type: 'error',
           text: EXISTING_AUTH_RECOVERY_FAILURE_NOTICE,
         });
         return;
       }
+
       const safeRecoveryMessage = authSignupLikelyCompleted
         ? `${PARTIAL_SUCCESS_NOTICE} ${baseErrorMessage}`
         : baseErrorMessage;
@@ -444,19 +544,29 @@ export function RegistrationCard() {
   };
 
   return (
-    <div className="w-full bg-white rounded-3xl shadow-2xl overflow-hidden" style={{ fontFamily: "'Poppins', sans-serif" }}>
+    <div
+      className="w-full bg-white rounded-3xl shadow-2xl overflow-hidden"
+      style={{ fontFamily: "'Poppins', sans-serif" }}
+    >
       <div className="flex flex-col md:flex-row">
-        {/* Left Side - Branded Area */}
         <div className="w-full md:w-2/5 bg-gradient-to-br from-[#0f172a] to-[#1e293b] p-12 flex flex-col justify-center text-white">
           <div className="mb-8">
             <div className="w-16 h-16 bg-[#1bb9d3] rounded-2xl flex items-center justify-center mb-6">
               <svg className="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"
+                />
               </svg>
             </div>
             <h2 className="text-4xl font-bold mb-4">Join Our Program</h2>
-            <p className="text-gray-300 text-lg">Create your account and start earning rewards today.</p>
+            <p className="text-gray-300 text-lg">
+              Create your account and start earning rewards today.
+            </p>
           </div>
+
           <div className="space-y-4">
             <div className="flex items-center gap-3">
               <div className="w-2 h-2 bg-[#1bb9d3] rounded-full"></div>
@@ -473,13 +583,10 @@ export function RegistrationCard() {
           </div>
         </div>
 
-        {/* Right Side - Registration Form */}
         <div className="w-full md:w-3/5 p-12">
-          <h1 className="mb-2 text-3xl font-semibold text-gray-800">
-            Create Account
-          </h1>
+          <h1 className="mb-2 text-3xl font-semibold text-gray-800">Create Account</h1>
           <p className="mb-8 text-gray-500">Fill in your details to get started</p>
-          
+
           {message && (
             <div
               className={`mb-6 p-4 rounded-xl ${
@@ -495,17 +602,17 @@ export function RegistrationCard() {
           {registeredMember && (
             <div className="mb-6 p-5 rounded-xl bg-[#1A2B47] text-white">
               <p className="text-sm opacity-90 mb-1">Your Member Number</p>
-              <p className="text-2xl font-semibold mb-3">
-                {registeredMember.memberNumber}
-              </p>
+              <p className="text-2xl font-semibold mb-3">{registeredMember.memberNumber}</p>
               <div className="text-sm opacity-90">
-                <p>Points Balance: <span className="font-semibold">{registeredMember.currentPointsBalance}</span></p>
+                <p>
+                  Points Balance:{' '}
+                  <span className="font-semibold">{registeredMember.currentPointsBalance}</span>
+                </p>
               </div>
             </div>
           )}
-          
+
           <form onSubmit={handleSubmit} className="space-y-5">
-            {/* Two-column grid for name fields */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label htmlFor="firstName" className="block mb-2 text-gray-700 font-medium">
@@ -540,7 +647,6 @@ export function RegistrationCard() {
               </div>
             </div>
 
-            {/* Two-column grid for email and phone */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label htmlFor="email" className="block mb-2 text-gray-700 font-medium">
@@ -569,13 +675,12 @@ export function RegistrationCard() {
                   value={formData.phone}
                   onChange={handleChange}
                   className="w-full px-4 py-3 bg-[#dbe4f2] rounded-xl border border-transparent focus:outline-none focus:ring-2 focus:ring-[#1bb9d3] focus:border-transparent transition-all"
-                  placeholder="(555) 123-4567"
+                  placeholder="0917 123 4567"
                   required
                 />
               </div>
             </div>
 
-            {/* Birthdate field - full width */}
             <div>
               <label htmlFor="birthdate" className="block mb-2 text-gray-700 font-medium">
                 Birthdate
@@ -591,7 +696,6 @@ export function RegistrationCard() {
               />
             </div>
 
-            {/* Password field - full width */}
             <div>
               <label htmlFor="password" className="block mb-2 text-gray-700 font-medium">
                 Password
@@ -629,7 +733,11 @@ export function RegistrationCard() {
               disabled={isSubmitting || isCooldownActive}
               className="w-full bg-[#1bb9d3] text-white py-3.5 rounded-xl hover:bg-[#18a9c0] transition-colors duration-200 mt-6 disabled:opacity-50 disabled:cursor-not-allowed font-semibold shadow-lg shadow-[#1bb9d3]/20"
             >
-              {isSubmitting ? 'Registering...' : isCooldownActive ? `Try again in ${cooldownSecondsRemaining}s` : 'Create Account'}
+              {isSubmitting
+                ? 'Registering...'
+                : isCooldownActive
+                  ? `Try again in ${cooldownSecondsRemaining}s`
+                  : 'Create Account'}
             </button>
           </form>
         </div>
