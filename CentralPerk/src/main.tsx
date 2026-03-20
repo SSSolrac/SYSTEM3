@@ -10,7 +10,9 @@ const root = createRoot(rootElement);
 const setupEnvText = `VITE_SUPABASE_URL=https://fuvhpohwxyezscryekwq.supabase.co
 VITE_SUPABASE_PROJECT_ID=fuvhpohwxyezscryekwq
 VITE_SUPABASE_PUBLISHABLE_KEY=your_publishable_key_here
-VITE_SUPABASE_ANON_KEY=your_anon_key_here`;
+VITE_SUPABASE_ANON_KEY=your_anon_key_here
+VITE_ENABLE_DEMO_AUTH=true
+VITE_FORCE_CUSTOMER_DEMO_AUTH=false`;
 
 if (!hasSupabaseConfig) {
   root.render(

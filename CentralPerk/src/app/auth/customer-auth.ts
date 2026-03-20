@@ -2,7 +2,8 @@ import { supabase } from "../../utils/supabase/client";
 import { setStoredCustomerSession } from "./auth";
 
 const DEMO_ACCOUNTS_KEY = "loyaltyhub-demo-accounts-v1";
-const DEV_AUTH_ENABLED = import.meta.env.DEV;
+const DEMO_AUTH_ENABLED = import.meta.env.VITE_ENABLE_DEMO_AUTH === "true" || import.meta.env.DEV;
+const FORCE_CUSTOMER_DEMO_AUTH = import.meta.env.VITE_FORCE_CUSTOMER_DEMO_AUTH === "true";
 const MIN_PASSWORD_LENGTH = 8;
 const DEMO_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -29,6 +30,10 @@ const DEMO_DOMAINS = new Set([
   "invalid",
   "mailinator.com",
   "tempmail.com",
+  "fake.com",
+  "fake.local",
+  "dummy.com",
+  "noemail.com",
 ]);
 
 const MEMBER_SELECT_COLUMNS = "id,member_id,member_number,first_name,last_name,email,phone,birthdate,points_balance,enrollment_date";
@@ -148,11 +153,45 @@ function isRateLimitError(rawError: unknown): boolean {
 export function isDemoEmail(rawEmail: string): boolean {
   const normalized = normalizeEmail(rawEmail);
   const [localPart = "", domain = ""] = normalized.split("@");
+  const normalizedDomain = domain.trim().toLowerCase();
 
-  if (!localPart || !domain) return false;
-  if (DEMO_DOMAINS.has(domain)) return true;
-  if (domain.endsWith(".local") || domain.endsWith(".test")) return true;
+  if (!localPart || !normalizedDomain) return false;
+  if (DEMO_DOMAINS.has(normalizedDomain)) return true;
+  if (
+    normalizedDomain === "localhost" ||
+    normalizedDomain.endsWith(".local") ||
+    normalizedDomain.endsWith(".test") ||
+    normalizedDomain.endsWith(".invalid") ||
+    normalizedDomain.endsWith(".example")
+  ) {
+    return true;
+  }
+  if (
+    normalizedDomain.includes("mailinator") ||
+    normalizedDomain.includes("tempmail") ||
+    normalizedDomain.includes("disposable") ||
+    normalizedDomain.includes("fake") ||
+    normalizedDomain.includes("dummy") ||
+    normalizedDomain.includes("example") ||
+    normalizedDomain.includes("test")
+  ) {
+    return true;
+  }
   return DEMO_LOCAL_PART_HINTS.some((hint) => localPart.includes(hint));
+}
+
+export function isCustomerDemoAuthEnabled(): boolean {
+  return DEMO_AUTH_ENABLED;
+}
+
+export function isCustomerDemoAuthForced(): boolean {
+  return FORCE_CUSTOMER_DEMO_AUTH;
+}
+
+function shouldUseCustomerDemoAuth(normalizedEmail: string): boolean {
+  if (!DEMO_AUTH_ENABLED) return false;
+  if (FORCE_CUSTOMER_DEMO_AUTH) return true;
+  return isDemoEmail(normalizedEmail);
 }
 
 function loadDemoAccounts(): DemoAccount[] {
@@ -298,8 +337,9 @@ export async function registerCustomer(input: RegisterCustomerInput): Promise<Re
     throw new AuthFlowError("DUPLICATE_PHONE", "This phone number is already registered.");
   }
 
-  const canUseDemoAuth = DEV_AUTH_ENABLED && isDemoEmail(normalizedEmail);
+  const canUseDemoAuth = shouldUseCustomerDemoAuth(normalizedEmail);
   if (canUseDemoAuth) {
+    console.info("DEMO REGISTER PATH USED");
     const demoAccounts = loadDemoAccounts();
     const duplicateDemo = demoAccounts.find((entry) => entry.email === normalizedEmail);
     if (duplicateDemo) {
@@ -342,6 +382,7 @@ export async function registerCustomer(input: RegisterCustomerInput): Promise<Re
     };
   }
 
+  console.info("SUPABASE REGISTER PATH USED");
   const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
     email: normalizedEmail,
     password: input.password,
@@ -389,24 +430,28 @@ export async function registerCustomer(input: RegisterCustomerInput): Promise<Re
 
 export async function loginCustomer(input: { email: string; password: string; role: "customer" | "admin" }): Promise<LoginCustomerResult> {
   const normalizedEmail = normalizeEmail(input.email);
-  if (input.role === "customer" && DEV_AUTH_ENABLED && isDemoEmail(normalizedEmail)) {
+  if (input.role === "customer" && shouldUseCustomerDemoAuth(normalizedEmail)) {
+    console.info("DEMO LOGIN PATH USED");
     const demoAccount = loadDemoAccounts().find((entry) => entry.email === normalizedEmail);
-    if (demoAccount) {
-      const incomingHash = await hashSecret(input.password);
-      if (incomingHash !== demoAccount.passwordHash) {
-        throw new AuthFlowError("INVALID_CREDENTIALS", "Invalid email or password.");
-      }
-
-      persistDemoSession({
-        memberId: demoAccount.memberId,
-        email: demoAccount.email,
-        phone: demoAccount.phone,
-        fullName: demoAccount.fullName,
-      });
-      return { authMode: "demo", accessToken: "demo-customer-session", userId: demoAccount.memberId };
+    if (!demoAccount) {
+      throw new AuthFlowError("INVALID_CREDENTIALS", "Invalid email or password.");
     }
+
+    const incomingHash = await hashSecret(input.password);
+    if (incomingHash !== demoAccount.passwordHash) {
+      throw new AuthFlowError("INVALID_CREDENTIALS", "Invalid email or password.");
+    }
+
+    persistDemoSession({
+      memberId: demoAccount.memberId,
+      email: demoAccount.email,
+      phone: demoAccount.phone,
+      fullName: demoAccount.fullName,
+    });
+    return { authMode: "demo", accessToken: "demo-customer-session", userId: demoAccount.memberId };
   }
 
+  console.info("SUPABASE LOGIN PATH USED");
   const authEmail = input.role === "admin" ? `${input.email.trim()}@admin.loyaltyhub.com` : normalizedEmail;
   const { data, error } = await supabase.auth.signInWithPassword({
     email: authEmail,

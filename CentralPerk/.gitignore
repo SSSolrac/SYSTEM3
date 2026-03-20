@@ -4,6 +4,7 @@ dist/
 *.log
 .env
 .env.*
+!.env.example
 *.md
 !README.md
 !AGENTS.md
