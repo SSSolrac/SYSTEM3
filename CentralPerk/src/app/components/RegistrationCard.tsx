@@ -3,8 +3,8 @@ import { supabase } from '../../utils/supabase/client';
 import { ensureWelcomePackage } from '../lib/loyalty-supabase';
 import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
 
-const WELCOME_NOTICE_STORAGE_KEY = 'centralperk-welcome-notice';
 const RATE_LIMIT_COOLDOWN_MS = 60_000;
+const REGISTRATION_COOLDOWN_STORAGE_KEY = 'centralperk-registration-cooldown-until-ms';
 
 interface Member {
   id: string;
@@ -46,6 +46,43 @@ export function RegistrationCard() {
     : 0;
   const isCooldownActive = cooldownSecondsRemaining > 0;
 
+  const getDuplicateMessage = (emailExists: boolean, phoneExists: boolean): string | null => {
+    if (emailExists && phoneExists) {
+      return 'A user with that email and phone number already exists.';
+    }
+    if (emailExists) {
+      return 'Duplicate email.';
+    }
+    if (phoneExists) {
+      return 'Duplicate number.';
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const storedCooldown = window.localStorage.getItem(REGISTRATION_COOLDOWN_STORAGE_KEY);
+    if (!storedCooldown) return;
+
+    const parsedCooldown = Number(storedCooldown);
+    if (!Number.isFinite(parsedCooldown) || parsedCooldown <= Date.now()) {
+      window.localStorage.removeItem(REGISTRATION_COOLDOWN_STORAGE_KEY);
+      return;
+    }
+
+    setCooldownUntilMs(parsedCooldown);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (cooldownUntilMs && cooldownUntilMs > Date.now()) {
+      window.localStorage.setItem(REGISTRATION_COOLDOWN_STORAGE_KEY, String(cooldownUntilMs));
+      return;
+    }
+
+    window.localStorage.removeItem(REGISTRATION_COOLDOWN_STORAGE_KEY);
+  }, [cooldownUntilMs]);
+
   useEffect(() => {
     if (!isCooldownActive) return;
     const intervalId = window.setInterval(() => {
@@ -78,6 +115,21 @@ export function RegistrationCard() {
 
   const hasAnyHint = (haystack: string, hints: string[]) =>
     hints.some((hint) => haystack.toLowerCase().includes(hint));
+
+  const normalizePhoneForStorage = (value: string) => {
+    const trimmed = value.trim();
+    const digits = trimmed.replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.length === 10) return `+1${digits}`;
+    if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+    if (trimmed.startsWith('+')) return `+${digits}`;
+    return `+${digits}`;
+  };
+
+  const isAuthAlreadyExistsError = (rawError: unknown) => {
+    const text = extractErrorText(rawError).toLowerCase();
+    return hasAnyHint(text, AUTH_ALREADY_EXISTS_HINTS);
+  };
 
   const isRateLimitError = (rawError: unknown) => {
     if (!rawError || typeof rawError !== 'object') return false;
@@ -127,6 +179,61 @@ export function RegistrationCard() {
     return errorText || 'Registration failed. Please try again.';
   };
 
+  const findExistingMemberByIdentity = async (normalizedEmail: string, normalizedPhone: string) => {
+    const { data, error } = await supabase
+      .from('loyalty_members')
+      .select('*')
+      .or(`email.ilike.${normalizedEmail},phone.eq.${normalizedPhone}`)
+      .limit(20);
+    if (error) throw error;
+
+    const members = data ?? [];
+    return members.find((member) => {
+      const memberEmail = String(member.email ?? '').trim().toLowerCase();
+      const memberPhone = normalizePhoneForStorage(String(member.phone ?? ''));
+      return memberEmail === normalizedEmail || (normalizedPhone && memberPhone === normalizedPhone);
+    }) ?? null;
+  };
+
+  const createOrRepairMemberProfile = async (params: {
+    firstName: string;
+    lastName: string;
+    normalizedEmail: string;
+    normalizedPhone: string;
+    birthdate: string;
+  }) => {
+    const { data: insertedMember, error: insertError } = await supabase
+      .from('loyalty_members')
+      .insert([
+        {
+          first_name: params.firstName,
+          last_name: params.lastName,
+          email: params.normalizedEmail,
+          phone: params.normalizedPhone,
+          birthdate: params.birthdate,
+          points_balance: 0,
+          tier: 'Bronze',
+        },
+      ])
+      .select()
+      .single();
+
+    if (!insertError && insertedMember) {
+      return { member: insertedMember, repairedExisting: false };
+    }
+
+    const insertErrorText = extractErrorText(insertError).toLowerCase();
+    if (hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
+      const existingMember = await findExistingMemberByIdentity(params.normalizedEmail, params.normalizedPhone);
+      if (existingMember) {
+        return { member: existingMember, repairedExisting: true };
+      }
+      throw new Error('PROFILE_CREATION_FAILED');
+    }
+
+    throw insertError ?? new Error('PROFILE_CREATION_FAILED');
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitLockRef.current || isSubmitting) return;
@@ -144,10 +251,16 @@ export function RegistrationCard() {
 
     let authSignupLikelyCompleted = false;
     let normalizedEmail = '';
+    let normalizedPhone = '';
+    let recoveredFromExistingAuthSignup = false;
+    let shouldConfirmEmail = true;
 
     try {
       normalizedEmail = formData.email.trim().toLowerCase();
-      const normalizedPhone = formData.phone.trim();
+      normalizedPhone = normalizePhoneForStorage(formData.phone);
+      if (!normalizedPhone || normalizedPhone.replace(/\D/g, '').length < 10) {
+        throw new Error('Please enter a valid phone number.');
+      }
       // Pre-check email and phone before auth signup to prevent duplicate registrations.
       const { data: existingMembers, error: existingMembersError } = await supabase
         .from('loyalty_members')
@@ -162,7 +275,7 @@ export function RegistrationCard() {
         (member) => member.email?.trim().toLowerCase() === normalizedEmail
       );
       const phoneExists = (existingMembers ?? []).some(
-        (member) => member.phone?.trim() === normalizedPhone
+        (member) => normalizePhoneForStorage(String(member.phone ?? '')) === normalizedPhone
       );
       const duplicateMessage = getDuplicateMessage(emailExists, phoneExists);
 
@@ -187,60 +300,61 @@ export function RegistrationCard() {
         if (isRateLimitError(signUpError)) {
           setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
         }
-        throw signUpError;
-      }
-
-      // Insert member profile after auth signup (or profile-recovery flow).
-      const { data: newMember, error: insertError } = await supabase
-        .from('loyalty_members')
-        .insert([
-          {
-            first_name: formData.firstName,
-            last_name: formData.lastName,
-            email: normalizedEmail,
-            phone: normalizedPhone,
-            birthdate: formData.birthdate,
-            points_balance: 0,
-            tier: 'Bronze',
-          },
-        ])
-        .select()
-        .single();
-
-      if (insertError) {
-        const insertErrorText = extractErrorText(insertError).toLowerCase();
-        if (hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
-          throw new Error('A user with that email and phone number already exists.');
+        if (!isAuthAlreadyExistsError(signUpError)) {
+          throw signUpError;
         }
-        throw new Error('PROFILE_CREATION_FAILED');
+        recoveredFromExistingAuthSignup = true;
       }
+      authSignupLikelyCompleted = true;
+      shouldConfirmEmail = !signUpData?.session;
 
-      if (!newMember) {
-        throw new Error('PROFILE_CREATION_FAILED');
-      }
-
-      const shouldConfirmEmail = !signUpData.session;
+      const { member: newMember } = await createOrRepairMemberProfile({
+        firstName: formData.firstName,
+        lastName: formData.lastName,
+        normalizedEmail,
+        normalizedPhone,
+        birthdate: formData.birthdate,
+      });
       const successSuffix = shouldConfirmEmail
         ? 'Please check your email to confirm your account before logging in.'
         : 'You can now log in.';
       let successMessage = `Registration successful! Welcome to our loyalty program. ${successSuffix}`;
+      const sideEffectNotes: string[] = [];
 
-      const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
-      const memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
+      let memberPointsBalance = Number(newMember.points_balance ?? 0);
+      try {
+        const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
+        memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
+        if (welcomeResult.granted) {
+          successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
+        }
+      } catch (welcomeError) {
+        console.error('Welcome package setup error:', welcomeError);
+        sideEffectNotes.push('Your account was created, but welcome bonus processing is still pending.');
+      }
 
-      if (welcomeResult.granted) {
-        successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
+      if (recoveredFromExistingAuthSignup) {
+        sideEffectNotes.unshift('Your login account already existed, and we completed profile setup for you.');
       }
 
       if (formData.referralCode.trim()) {
-        const referral = await applyReferralCodeForSignup({
-          referralCode: formData.referralCode.trim(),
-          refereeMemberId: String(newMember.member_number),
-          refereeEmail: String(newMember.email),
-        });
-        if (!referral.applied) {
-          successMessage = `${successMessage} Note: your referral code was invalid or not applicable.`;
+        try {
+          const referral = await applyReferralCodeForSignup({
+            referralCode: formData.referralCode.trim(),
+            refereeMemberId: String(newMember.member_number),
+            refereeEmail: String(newMember.email),
+          });
+          if (!referral.applied) {
+            sideEffectNotes.push('Your referral code was invalid or not applicable.');
+          }
+        } catch (referralError) {
+          console.error('Referral apply error:', referralError);
+          sideEffectNotes.push('Referral processing is pending. You can apply a valid referral later with support.');
         }
+      }
+
+      if (sideEffectNotes.length > 0) {
+        successMessage = `${successMessage} ${sideEffectNotes.join(' ')}`;
       }
 
       // Update state with new member data
@@ -280,11 +394,14 @@ export function RegistrationCard() {
         setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
       }
 
+      const baseErrorMessage = buildReadableErrorMessage(error);
+      const safeRecoveryMessage = authSignupLikelyCompleted
+        ? `${PARTIAL_SUCCESS_NOTICE} ${baseErrorMessage}`
+        : baseErrorMessage;
+
       setMessage({
-        type: isPartialSuccess ? 'success' : 'error',
-        text: isPartialSuccess
-          ? `${PARTIAL_SUCCESS_NOTICE} ${buildReadableErrorMessage(error)}`
-          : buildReadableErrorMessage(error),
+        type: 'error',
+        text: safeRecoveryMessage,
       });
     } finally {
       setIsSubmitting(false);
