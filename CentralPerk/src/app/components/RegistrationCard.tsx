@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { supabase } from '../../utils/supabase/client';
 import { ensureWelcomePackage } from '../lib/loyalty-supabase';
 import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
+import { isDemoEmail, mapAuthErrorToMessage, registerCustomer } from '../auth/customer-auth';
 import {
   AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT,
   EMAIL_CONFIRMATION_REQUIRED_MESSAGE,
@@ -23,27 +23,8 @@ interface Member {
   createdAt: string;
 }
 
-const AUTH_RATE_LIMIT_HINTS = ['over_email_send_rate_limit', 'rate limit', 'too many requests'];
-const AUTH_ALREADY_EXISTS_HINTS = ['user already registered', 'already registered', 'already exists', 'user exists'];
-const PROFILE_CONSTRAINT_HINTS = ['duplicate key', 'already exists', 'violates unique constraint'];
-const PARTIAL_SUCCESS_NOTICE =
-  'Your account may already have been created. Please check your email for a confirmation link, or try signing in after confirming your email.';
-const EXISTING_AUTH_RECOVERY_FAILURE_NOTICE =
-  'Your account may already exist, but profile setup is incomplete. Please try signing in or contact support.';
-const MEMBER_SELECT_COLUMNS = 'id,member_id,member_number,first_name,last_name,email,phone,birthdate,points_balance,enrollment_date';
-
-interface MemberProfileInput {
-  firstName: string;
-  lastName: string;
-  email: string;
-  phone: string;
-  birthdate: string;
-}
-
-interface MemberProfileResult {
-  memberRecord: Record<string, any>;
-  recoveredFromExistingAuthSignup: boolean;
-}
+const DEMO_AUTH_SUCCESS_MESSAGE =
+  'Registration complete in Development Demo Auth mode. You are signed in without email confirmation.';
 
 export function RegistrationCard() {
   const [formData, setFormData] = useState({
@@ -66,19 +47,6 @@ export function RegistrationCard() {
     ? Math.max(0, Math.ceil((cooldownUntilMs - currentTimeMs) / 1000))
     : 0;
   const isCooldownActive = cooldownSecondsRemaining > 0;
-
-  const getDuplicateMessage = (emailExists: boolean, phoneExists: boolean): string | null => {
-    if (emailExists && phoneExists) {
-      return 'A user with that email and phone number already exists.';
-    }
-    if (emailExists) {
-      return 'Duplicate email.';
-    }
-    if (phoneExists) {
-      return 'Duplicate number.';
-    }
-    return null;
-  };
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -119,164 +87,7 @@ export function RegistrationCard() {
     });
   };
 
-  const extractErrorText = (rawError: unknown) => {
-    return typeof rawError === 'string'
-      ? rawError
-      : rawError && typeof rawError === 'object'
-        ? [
-            'message' in rawError ? String(rawError.message ?? '') : '',
-            'details' in rawError ? String(rawError.details ?? '') : '',
-            'hint' in rawError ? String(rawError.hint ?? '') : '',
-            JSON.stringify(rawError),
-          ]
-            .filter(Boolean)
-            .join(' ')
-        : '';
-  };
-
-  const hasAnyHint = (haystack: string, hints: string[]) =>
-    hints.some((hint) => haystack.toLowerCase().includes(hint));
-
-  const normalizePhoneNumber = (rawPhone: string) => {
-    const trimmed = rawPhone.trim();
-    if (!trimmed) return '';
-    const digitsOnly = trimmed.replace(/\D/g, '');
-    if (!digitsOnly) return '';
-    return trimmed.startsWith('+') ? `+${digitsOnly}` : digitsOnly;
-  };
-
   const normalizeEmail = (rawEmail: string) => rawEmail.trim().toLowerCase();
-
-  const isAlreadyExistsAuthError = (rawError: unknown) => {
-    if (!rawError || typeof rawError !== 'object') return false;
-    const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
-    const normalizedText = extractErrorText(rawError).toLowerCase();
-    return code.includes('already') || hasAnyHint(normalizedText, AUTH_ALREADY_EXISTS_HINTS);
-  };
-
-  const createOrRepairMemberProfile = async (input: MemberProfileInput): Promise<MemberProfileResult> => {
-    const { data: insertedMember, error: insertError } = await supabase
-      .from('loyalty_members')
-      .insert([
-        {
-          first_name: input.firstName,
-          last_name: input.lastName,
-          email: input.email,
-          phone: input.phone,
-          birthdate: input.birthdate,
-          points_balance: 0,
-          tier: 'Bronze',
-        },
-      ])
-      .select(MEMBER_SELECT_COLUMNS)
-      .single();
-
-    if (!insertError && insertedMember) {
-      return {
-        memberRecord: insertedMember,
-        recoveredFromExistingAuthSignup: false,
-      };
-    }
-
-    const insertErrorText = extractErrorText(insertError).toLowerCase();
-    if (!hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
-      throw new Error('PROFILE_CREATION_FAILED');
-    }
-
-    const { data: existingMember, error: existingMemberError } = await supabase
-      .from('loyalty_members')
-      .select(MEMBER_SELECT_COLUMNS)
-      .or(`email.ilike.${input.email},phone.eq.${input.phone}`)
-      .limit(1)
-      .maybeSingle();
-
-    if (existingMemberError || !existingMember) {
-      throw new Error('PROFILE_CREATION_FAILED');
-    }
-
-    const needsRepair =
-      !existingMember.first_name ||
-      !existingMember.last_name ||
-      !existingMember.phone ||
-      !existingMember.birthdate;
-
-    if (!needsRepair) {
-      return {
-        memberRecord: existingMember,
-        recoveredFromExistingAuthSignup: false,
-      };
-    }
-
-    const { data: repairedMember, error: repairError } = await supabase
-      .from('loyalty_members')
-      .update({
-        first_name: existingMember.first_name || input.firstName,
-        last_name: existingMember.last_name || input.lastName,
-        phone: existingMember.phone || input.phone,
-        birthdate: existingMember.birthdate || input.birthdate,
-      })
-      .eq('id', existingMember.id)
-      .select(MEMBER_SELECT_COLUMNS)
-      .single();
-
-    if (repairError || !repairedMember) {
-      throw new Error('PROFILE_CREATION_FAILED');
-    }
-
-    return {
-      memberRecord: repairedMember,
-      recoveredFromExistingAuthSignup: true,
-    };
-  };
-
-  const isRateLimitError = (rawError: unknown) => {
-    if (!rawError || typeof rawError !== 'object') return false;
-    if (isAlreadyExistsAuthError(rawError)) return false;
-    const status = 'status' in rawError ? Number(rawError.status) : NaN;
-    const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
-    const text = extractErrorText(rawError).toLowerCase();
-    return status === 429 || code.includes('over_email_send_rate_limit') || hasAnyHint(text, AUTH_RATE_LIMIT_HINTS);
-  };
-
-  const buildReadableErrorMessage = (rawError: unknown) => {
-    const errorText = extractErrorText(rawError);
-    const normalizedErrorText = errorText.toLowerCase();
-
-    if (isRateLimitError(rawError) || hasAnyHint(normalizedErrorText, AUTH_RATE_LIMIT_HINTS)) {
-      return 'Too many registration attempts right now. Please wait a minute before trying again.';
-    }
-
-    if (errorText.includes('A user with that email and phone number already exists.')) {
-      return 'A user with that email and phone number already exists.';
-    }
-
-    if (errorText.includes('Duplicate email.') || errorText.includes('Email already registered')) {
-      return 'Duplicate email.';
-    }
-
-    if (
-      errorText.includes('Duplicate number.') ||
-      errorText.includes('Phone number already registered') ||
-      errorText.includes('This phone number is already registered')
-    ) {
-      return 'Duplicate number.';
-    }
-
-    if (
-      errorText.includes('row-level security policy') ||
-      errorText.includes('duplicate key') ||
-      errorText.includes('already exists') ||
-      errorText.includes('already registered')
-    ) {
-      return 'A user with that email and phone number already exists.';
-    }
-
-    if (errorText.includes('PROFILE_CREATION_FAILED')) {
-      return 'Account authentication was created, but profile setup failed. Please try logging in, and contact support if the issue persists.';
-    }
-
-    return errorText || 'Registration failed. Please try again.';
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -293,79 +104,32 @@ export function RegistrationCard() {
     setMessage(null);
     setRegisteredMember(null);
 
-    let authSignupLikelyCompleted = false;
     let authUserAlreadyExisted = false;
-    let memberProfileCreatedOrRepaired = false;
-    let normalizedEmail = '';
+    const normalizedEmail = normalizeEmail(formData.email);
 
     try {
-      normalizedEmail = normalizeEmail(formData.email);
-      const normalizedPhone = normalizePhoneNumber(formData.phone);
-      // Pre-check email and phone before auth signup to prevent duplicate registrations.
-      const { data: existingMembers, error: existingMembersError } = await supabase
-        .from('loyalty_members')
-        .select('email, phone')
-        .or(`email.ilike.${normalizedEmail},phone.eq.${normalizedPhone}`);
-
-      if (existingMembersError) {
-        throw existingMembersError;
-      }
-
-      const emailExists = (existingMembers ?? []).some(
-        (member) => member.email?.trim().toLowerCase() === normalizedEmail
-      );
-      const phoneExists = (existingMembers ?? []).some(
-        (member) => normalizePhoneNumber(member.phone ?? '') === normalizedPhone
-      );
-      const duplicateMessage = getDuplicateMessage(emailExists, phoneExists);
-
-      if (duplicateMessage) {
-        throw new Error(duplicateMessage);
-      }
-
-      // Create auth user after pre-check succeeds.
-      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email: normalizedEmail,
-        password: formData.password,
-        options: {
-          data: {
-            first_name: formData.firstName,
-            last_name: formData.lastName,
-            birthdate: formData.birthdate,
-          },
-        },
-      });
-
-      if (signUpError) {
-        if (isAlreadyExistsAuthError(signUpError)) {
-          authSignupLikelyCompleted = true;
-          authUserAlreadyExisted = true;
-        } else if (isRateLimitError(signUpError)) {
-          setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
-          throw signUpError;
-        } else {
-          throw signUpError;
-        }
-      } else {
-        authSignupLikelyCompleted = true;
-      }
-
-      const { memberRecord, recoveredFromExistingAuthSignup } = await createOrRepairMemberProfile({
+      const registerResult = await registerCustomer({
         firstName: formData.firstName,
         lastName: formData.lastName,
         email: normalizedEmail,
-        phone: normalizedPhone,
+        phone: formData.phone,
         birthdate: formData.birthdate,
+        password: formData.password,
       });
-      memberProfileCreatedOrRepaired = true;
+      const { memberRecord, recoveredFromExistingAuthSignup } = registerResult;
+      authUserAlreadyExisted = registerResult.authUserAlreadyExisted;
 
-      const emailConfirmationRequired = !authUserAlreadyExisted && !signUpData?.session;
-      const immediateLoginAvailable = !authUserAlreadyExisted && Boolean(signUpData?.session);
+      const emailConfirmationRequired = registerResult.emailConfirmationRequired;
+      const immediateLoginAvailable = registerResult.immediateLoginAvailable;
       let successMessage = emailConfirmationRequired
         ? EMAIL_CONFIRMATION_REQUIRED_MESSAGE
         : immediateLoginAvailable
           ? 'Registration complete. You can now log in.'
           : 'Registration completed.';
+
+      if (registerResult.authMode === 'demo') {
+        successMessage = DEMO_AUTH_SUCCESS_MESSAGE;
+      }
 
       const welcomeResult = await ensureWelcomePackage(memberRecord.member_number, memberRecord.email);
       const memberPointsBalance = Number(welcomeResult.newBalance ?? memberRecord.points_balance ?? 0);
@@ -426,26 +190,14 @@ export function RegistrationCard() {
       console.log('Member registered:', memberRecord);
     } catch (error) {
       console.error('Registration error:', error);
-
-      if (isRateLimitError(error)) {
+      const mappedError = mapAuthErrorToMessage(error);
+      if (mappedError.toLowerCase().includes('rate limit')) {
         setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
       }
 
-      const baseErrorMessage = buildReadableErrorMessage(error);
-      if (authUserAlreadyExisted && !memberProfileCreatedOrRepaired) {
-        setMessage({
-          type: 'error',
-          text: EXISTING_AUTH_RECOVERY_FAILURE_NOTICE,
-        });
-        return;
-      }
-      const safeRecoveryMessage = authSignupLikelyCompleted
-        ? `${PARTIAL_SUCCESS_NOTICE} ${baseErrorMessage}`
-        : baseErrorMessage;
-
       setMessage({
         type: 'error',
-        text: safeRecoveryMessage,
+        text: mappedError,
       });
     } finally {
       setIsSubmitting(false);
@@ -566,6 +318,11 @@ export function RegistrationCard() {
                   placeholder="your.email@example.com"
                   required
                 />
+                {formData.email && isDemoEmail(formData.email) && (
+                  <p className="mt-2 text-xs text-[#1A2B47]">
+                    Development demo email detected. Registration will bypass Supabase email confirmation and sign you in locally.
+                  </p>
+                )}
               </div>
 
               <div>
