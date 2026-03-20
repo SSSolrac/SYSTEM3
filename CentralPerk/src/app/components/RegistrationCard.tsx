@@ -23,6 +23,8 @@ const AUTH_ALREADY_EXISTS_HINTS = ['user already registered', 'already registere
 const PROFILE_CONSTRAINT_HINTS = ['duplicate key', 'already exists', 'violates unique constraint'];
 const PARTIAL_SUCCESS_NOTICE =
   'Your account may already have been created. Please check your email for a confirmation link, or try signing in after confirming your email.';
+const EXISTING_AUTH_RECOVERY_FAILURE_NOTICE =
+  'Your account may already exist, but profile setup is incomplete. Please try signing in or contact support.';
 const MEMBER_SELECT_COLUMNS = 'id,member_id,member_number,first_name,last_name,email,phone,birthdate,points_balance,enrollment_date';
 
 interface MemberProfileInput {
@@ -36,6 +38,11 @@ interface MemberProfileInput {
 interface MemberProfileResult {
   memberRecord: Record<string, any>;
   recoveredFromExistingAuthSignup: boolean;
+}
+
+interface DuplicatePrecheckResult {
+  emailExists: boolean;
+  phoneExists: boolean;
 }
 
 export function RegistrationCard() {
@@ -130,6 +137,21 @@ export function RegistrationCard() {
   const hasAnyHint = (haystack: string, hints: string[]) =>
     hints.some((hint) => haystack.toLowerCase().includes(hint));
 
+  const normalizePhoneNumber = (rawPhone: string) => {
+    const trimmed = rawPhone.trim();
+    if (!trimmed) return '';
+    const digitsOnly = trimmed.replace(/\D/g, '');
+    if (!digitsOnly) return '';
+    return trimmed.startsWith('+') ? `+${digitsOnly}` : digitsOnly;
+  };
+
+  const isAlreadyExistsAuthError = (rawError: unknown) => {
+    if (!rawError || typeof rawError !== 'object') return false;
+    const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
+    const normalizedText = extractErrorText(rawError).toLowerCase();
+    return code.includes('already') || hasAnyHint(normalizedText, AUTH_ALREADY_EXISTS_HINTS);
+  };
+
   const createOrRepairMemberProfile = async (input: MemberProfileInput): Promise<MemberProfileResult> => {
     const { data: insertedMember, error: insertError } = await supabase
       .from('loyalty_members')
@@ -207,10 +229,26 @@ export function RegistrationCard() {
 
   const isRateLimitError = (rawError: unknown) => {
     if (!rawError || typeof rawError !== 'object') return false;
+    if (isAlreadyExistsAuthError(rawError)) return false;
     const status = 'status' in rawError ? Number(rawError.status) : NaN;
     const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
     const text = extractErrorText(rawError).toLowerCase();
     return status === 429 || code.includes('over_email_send_rate_limit') || hasAnyHint(text, AUTH_RATE_LIMIT_HINTS);
+  };
+
+  const shouldAttemptProfileRecoveryAfterSignupError = (
+    signUpError: unknown,
+    duplicatePrecheckResult: DuplicatePrecheckResult
+  ) => {
+    if (isAlreadyExistsAuthError(signUpError)) {
+      return true;
+    }
+
+    if (isRateLimitError(signUpError) && !duplicatePrecheckResult.emailExists) {
+      return true;
+    }
+
+    return false;
   };
 
   const buildReadableErrorMessage = (rawError: unknown) => {
@@ -269,11 +307,14 @@ export function RegistrationCard() {
     setRegisteredMember(null);
 
     let authSignupLikelyCompleted = false;
+    let authUserAlreadyExisted = false;
+    let attemptedProfileRecoveryAfterRateLimit = false;
+    let memberProfileCreatedOrRepaired = false;
     let normalizedEmail = '';
 
     try {
       normalizedEmail = formData.email.trim().toLowerCase();
-      const normalizedPhone = formData.phone.trim();
+      const normalizedPhone = normalizePhoneNumber(formData.phone);
       // Pre-check email and phone before auth signup to prevent duplicate registrations.
       const { data: existingMembers, error: existingMembersError } = await supabase
         .from('loyalty_members')
@@ -288,8 +329,12 @@ export function RegistrationCard() {
         (member) => member.email?.trim().toLowerCase() === normalizedEmail
       );
       const phoneExists = (existingMembers ?? []).some(
-        (member) => member.phone?.trim() === normalizedPhone
+        (member) => normalizePhoneNumber(member.phone ?? '') === normalizedPhone
       );
+      const duplicatePrecheckResult: DuplicatePrecheckResult = {
+        emailExists,
+        phoneExists,
+      };
       const duplicateMessage = getDuplicateMessage(emailExists, phoneExists);
 
       if (duplicateMessage) {
@@ -310,12 +355,27 @@ export function RegistrationCard() {
       });
 
       if (signUpError) {
-        if (isRateLimitError(signUpError)) {
+        const shouldAttemptRecovery = shouldAttemptProfileRecoveryAfterSignupError(signUpError, duplicatePrecheckResult);
+        const rateLimitedSignup = isRateLimitError(signUpError);
+
+        if (rateLimitedSignup) {
           setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
         }
-        throw signUpError;
+
+        if (!shouldAttemptRecovery) {
+          throw signUpError;
+        }
+
+        authSignupLikelyCompleted = true;
+        if (isAlreadyExistsAuthError(signUpError)) {
+          authUserAlreadyExisted = true;
+        }
+        if (rateLimitedSignup) {
+          attemptedProfileRecoveryAfterRateLimit = true;
+        }
+      } else {
+        authSignupLikelyCompleted = true;
       }
-      authSignupLikelyCompleted = true;
 
       const { memberRecord, recoveredFromExistingAuthSignup } = await createOrRepairMemberProfile({
         firstName: formData.firstName,
@@ -324,8 +384,9 @@ export function RegistrationCard() {
         phone: normalizedPhone,
         birthdate: formData.birthdate,
       });
+      memberProfileCreatedOrRepaired = true;
 
-      const shouldConfirmEmail = !signUpData.session;
+      const shouldConfirmEmail = authUserAlreadyExisted ? false : !signUpData?.session;
       const successSuffix = shouldConfirmEmail
         ? 'Please check your email to confirm your account before logging in.'
         : 'You can now log in.';
@@ -351,6 +412,13 @@ export function RegistrationCard() {
 
       if (recoveredFromExistingAuthSignup) {
         successMessage = `${successMessage} We also repaired an incomplete member profile from an earlier signup attempt.`;
+      }
+      if (authUserAlreadyExisted) {
+        successMessage =
+          'Your account already existed, and we completed your member profile setup. Please sign in with your existing account credentials.';
+      } else if (attemptedProfileRecoveryAfterRateLimit) {
+        successMessage =
+          'We hit a temporary signup limit, but your account likely already existed and we completed your member profile setup. Please sign in with your existing account credentials.';
       }
 
       // Update state with new member data
@@ -391,12 +459,19 @@ export function RegistrationCard() {
       }
 
       const baseErrorMessage = buildReadableErrorMessage(error);
+      if ((authUserAlreadyExisted || attemptedProfileRecoveryAfterRateLimit) && !memberProfileCreatedOrRepaired) {
+        setMessage({
+          type: 'error',
+          text: EXISTING_AUTH_RECOVERY_FAILURE_NOTICE,
+        });
+        return;
+      }
       const safeRecoveryMessage = authSignupLikelyCompleted
         ? `${PARTIAL_SUCCESS_NOTICE} ${baseErrorMessage}`
         : baseErrorMessage;
 
       setMessage({
-        type: authSignupLikelyCompleted ? 'success' : 'error',
+        type: 'error',
         text: safeRecoveryMessage,
       });
     } finally {
