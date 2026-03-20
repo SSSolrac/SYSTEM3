@@ -5,8 +5,6 @@ import { applyReferralCodeForSignup } from '../lib/member-lifecycle';
 
 const WELCOME_NOTICE_STORAGE_KEY = 'centralperk-welcome-notice';
 const RATE_LIMIT_COOLDOWN_MS = 60_000;
-const RATE_LIMIT_COOLDOWN_STORAGE_KEY = 'centralperk-signup-cooldown-until';
-const AUTH_PROGRESS_STORAGE_KEY = 'centralperk-signup-auth-progress';
 
 interface Member {
   id: string;
@@ -56,23 +54,6 @@ export function RegistrationCard() {
     return () => window.clearInterval(intervalId);
   }, [isCooldownActive]);
 
-  useEffect(() => {
-    const savedCooldown = Number(localStorage.getItem(RATE_LIMIT_COOLDOWN_STORAGE_KEY) || 0);
-    if (savedCooldown > Date.now()) {
-      setCooldownUntilMs(savedCooldown);
-      setCurrentTimeMs(Date.now());
-      return;
-    }
-    localStorage.removeItem(RATE_LIMIT_COOLDOWN_STORAGE_KEY);
-  }, []);
-
-  useEffect(() => {
-    if (cooldownUntilMs && cooldownUntilMs <= currentTimeMs) {
-      localStorage.removeItem(RATE_LIMIT_COOLDOWN_STORAGE_KEY);
-      setCooldownUntilMs(null);
-    }
-  }, [cooldownUntilMs, currentTimeMs]);
-
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFormData({
       ...formData,
@@ -104,111 +85,6 @@ export function RegistrationCard() {
     const code = 'code' in rawError ? String(rawError.code ?? '').toLowerCase() : '';
     const text = extractErrorText(rawError).toLowerCase();
     return status === 429 || code.includes('over_email_send_rate_limit') || hasAnyHint(text, AUTH_RATE_LIMIT_HINTS);
-  };
-
-  const isAuthAlreadyExistsError = (rawError: unknown) => {
-    const errorText = extractErrorText(rawError).toLowerCase();
-    return hasAnyHint(errorText, AUTH_ALREADY_EXISTS_HINTS);
-  };
-
-  const setRateLimitCooldown = (durationMs = RATE_LIMIT_COOLDOWN_MS) => {
-    const until = Date.now() + durationMs;
-    setCooldownUntilMs(until);
-    setCurrentTimeMs(Date.now());
-    localStorage.setItem(RATE_LIMIT_COOLDOWN_STORAGE_KEY, String(until));
-  };
-
-  const getAuthProgressMap = () => {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(AUTH_PROGRESS_STORAGE_KEY) || '{}');
-      return parsed && typeof parsed === 'object' ? (parsed as Record<string, number>) : {};
-    } catch {
-      return {};
-    }
-  };
-
-  const markAuthProgressForEmail = (email: string) => {
-    const progress = getAuthProgressMap();
-    progress[email.toLowerCase()] = Date.now();
-    localStorage.setItem(AUTH_PROGRESS_STORAGE_KEY, JSON.stringify(progress));
-  };
-
-  const hasAuthProgressForEmail = (email: string) => {
-    const progress = getAuthProgressMap();
-    const recordedAt = Number(progress[email.toLowerCase()] || 0);
-    const oneDayMs = 24 * 60 * 60 * 1000;
-    if (!recordedAt) return false;
-    if (Date.now() - recordedAt > oneDayMs) {
-      delete progress[email.toLowerCase()];
-      localStorage.setItem(AUTH_PROGRESS_STORAGE_KEY, JSON.stringify(progress));
-      return false;
-    }
-    return true;
-  };
-
-  const clearAuthProgressForEmail = (email: string) => {
-    const progress = getAuthProgressMap();
-    delete progress[email.toLowerCase()];
-    localStorage.setItem(AUTH_PROGRESS_STORAGE_KEY, JSON.stringify(progress));
-  };
-
-  const ensureMemberProfile = async (normalizedEmail: string, normalizedPhone: string) => {
-    const { data: existingMember, error: existingMemberError } = await supabase
-      .from('loyalty_members')
-      .select('*')
-      .ilike('email', normalizedEmail)
-      .limit(1)
-      .maybeSingle();
-    if (existingMemberError) throw existingMemberError;
-    if (existingMember) return existingMember;
-
-    const { data: phoneOwner, error: phoneOwnerError } = await supabase
-      .from('loyalty_members')
-      .select('id,email')
-      .eq('phone', normalizedPhone)
-      .limit(1)
-      .maybeSingle();
-    if (phoneOwnerError) throw phoneOwnerError;
-    if (phoneOwner && String(phoneOwner.email || '').trim().toLowerCase() !== normalizedEmail) {
-      throw new Error('Duplicate number.');
-    }
-
-    const { data: newMember, error: insertError } = await supabase
-      .from('loyalty_members')
-      .insert([
-        {
-          first_name: formData.firstName,
-          last_name: formData.lastName,
-          email: normalizedEmail,
-          phone: normalizedPhone,
-          birthdate: formData.birthdate,
-          points_balance: 0,
-          tier: 'Bronze',
-        },
-      ])
-      .select()
-      .single();
-
-    if (insertError) {
-      const insertErrorText = extractErrorText(insertError).toLowerCase();
-      if (hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
-        const { data: racedMember, error: racedMemberError } = await supabase
-          .from('loyalty_members')
-          .select('*')
-          .ilike('email', normalizedEmail)
-          .limit(1)
-          .maybeSingle();
-        if (racedMemberError) throw racedMemberError;
-        if (racedMember) return racedMember;
-        if (insertErrorText.includes('phone')) {
-          throw new Error('Duplicate number.');
-        }
-      }
-      throw new Error('PROFILE_CREATION_FAILED');
-    }
-
-    if (!newMember) throw new Error('PROFILE_CREATION_FAILED');
-    return newMember;
   };
 
   const buildReadableErrorMessage = (rawError: unknown) => {
@@ -272,82 +148,98 @@ export function RegistrationCard() {
     try {
       normalizedEmail = formData.email.trim().toLowerCase();
       const normalizedPhone = formData.phone.trim();
-      const hasPendingAuthProgress = hasAuthProgressForEmail(normalizedEmail);
-      let signUpData: { session: unknown } = { session: null };
+      // Pre-check email and phone before auth signup to prevent duplicate registrations.
+      const { data: existingMembers, error: existingMembersError } = await supabase
+        .from('loyalty_members')
+        .select('email, phone')
+        .or(`email.ilike.${normalizedEmail},phone.eq.${normalizedPhone}`);
 
-      if (!hasPendingAuthProgress) {
-        const { data, error: signUpError } = await supabase.auth.signUp({
-          email: normalizedEmail,
-          password: formData.password,
-          options: {
-            data: {
-              first_name: formData.firstName,
-              last_name: formData.lastName,
-              birthdate: formData.birthdate,
-            },
-          },
-        });
-        signUpData = { session: data.session };
-
-        if (signUpError) {
-          if (isRateLimitError(signUpError)) {
-            setRateLimitCooldown();
-            throw signUpError;
-          }
-          if (isAuthAlreadyExistsError(signUpError)) {
-            authSignupLikelyCompleted = true;
-            markAuthProgressForEmail(normalizedEmail);
-          } else {
-            throw signUpError;
-          }
-        } else {
-          authSignupLikelyCompleted = true;
-          markAuthProgressForEmail(normalizedEmail);
-        }
-      } else {
-        authSignupLikelyCompleted = true;
+      if (existingMembersError) {
+        throw existingMembersError;
       }
 
-      const newMember = await ensureMemberProfile(normalizedEmail, normalizedPhone);
+      const emailExists = (existingMembers ?? []).some(
+        (member) => member.email?.trim().toLowerCase() === normalizedEmail
+      );
+      const phoneExists = (existingMembers ?? []).some(
+        (member) => member.phone?.trim() === normalizedPhone
+      );
+      const duplicateMessage = getDuplicateMessage(emailExists, phoneExists);
+
+      if (duplicateMessage) {
+        throw new Error(duplicateMessage);
+      }
+
+      // Create auth user after pre-check succeeds.
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+        email: normalizedEmail,
+        password: formData.password,
+        options: {
+          data: {
+            first_name: formData.firstName,
+            last_name: formData.lastName,
+            birthdate: formData.birthdate,
+          },
+        },
+      });
+
+      if (signUpError) {
+        if (isRateLimitError(signUpError)) {
+          setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
+        }
+        throw signUpError;
+      }
+
+      // Insert member profile after auth signup (or profile-recovery flow).
+      const { data: newMember, error: insertError } = await supabase
+        .from('loyalty_members')
+        .insert([
+          {
+            first_name: formData.firstName,
+            last_name: formData.lastName,
+            email: normalizedEmail,
+            phone: normalizedPhone,
+            birthdate: formData.birthdate,
+            points_balance: 0,
+            tier: 'Bronze',
+          },
+        ])
+        .select()
+        .single();
+
+      if (insertError) {
+        const insertErrorText = extractErrorText(insertError).toLowerCase();
+        if (hasAnyHint(insertErrorText, PROFILE_CONSTRAINT_HINTS)) {
+          throw new Error('A user with that email and phone number already exists.');
+        }
+        throw new Error('PROFILE_CREATION_FAILED');
+      }
+
+      if (!newMember) {
+        throw new Error('PROFILE_CREATION_FAILED');
+      }
 
       const shouldConfirmEmail = !signUpData.session;
       const successSuffix = shouldConfirmEmail
         ? 'Please check your email to confirm your account before logging in.'
         : 'You can now log in.';
       let successMessage = `Registration successful! Welcome to our loyalty program. ${successSuffix}`;
-      let memberPointsBalance = Number(newMember.points_balance ?? 0);
-      try {
-        const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
-        memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
 
-        if (welcomeResult.granted) {
-          successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
-          localStorage.setItem(
-            WELCOME_NOTICE_STORAGE_KEY,
-            JSON.stringify({
-              memberNumber: newMember.member_number,
-              grantedAt: new Date().toISOString(),
-            })
-          );
-        }
-      } catch (welcomeError) {
-        console.warn('Welcome package setup issue after signup:', welcomeError);
-        successMessage = `${successMessage} Your account is ready, but welcome points are still being finalized.`;
+      const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
+      const memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
+
+      if (welcomeResult.granted) {
+        successMessage = `Registration successful! Welcome package applied. ${successSuffix}`;
       }
 
       if (formData.referralCode.trim()) {
-        try {
-          const referral = await applyReferralCodeForSignup({
-            referralCode: formData.referralCode.trim(),
-            refereeMemberId: String(newMember.member_number),
-            refereeEmail: String(newMember.email),
-          });
-          if (!referral.applied) {
-            successMessage = `${successMessage} Note: your referral code was invalid or not applicable.`;
-          }
-        } catch (referralError) {
-          console.warn('Referral application issue after signup:', referralError);
-          successMessage = `${successMessage} Your account is ready, but referral processing is still pending.`;
+        const referral = await applyReferralCodeForSignup({
+          referralCode: formData.referralCode.trim(),
+          refereeMemberId: String(newMember.member_number),
+          refereeEmail: String(newMember.email),
+        });
+        if (!referral.applied) {
+          successMessage = `${successMessage} Note: your referral code was invalid or not applicable.`;
         }
       }
 
@@ -379,17 +271,15 @@ export function RegistrationCard() {
         type: 'success',
         text: successMessage,
       });
-      clearAuthProgressForEmail(normalizedEmail);
 
       console.log('Member registered:', newMember);
     } catch (error) {
       console.error('Registration error:', error);
 
       if (isRateLimitError(error)) {
-        setRateLimitCooldown();
+        setCooldownUntilMs(Date.now() + RATE_LIMIT_COOLDOWN_MS);
       }
 
-      const isPartialSuccess = authSignupLikelyCompleted || (normalizedEmail ? hasAuthProgressForEmail(normalizedEmail) : false);
       setMessage({
         type: isPartialSuccess ? 'success' : 'error',
         text: isPartialSuccess
