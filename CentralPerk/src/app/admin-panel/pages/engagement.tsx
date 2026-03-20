@@ -12,12 +12,14 @@ import { useAdminData } from "../hooks/use-admin-data";
 import { queueSmsNotification } from "../../lib/notifications";
 import {
   buildInactiveMemberInsights,
+  createNotificationCampaignRecord,
   exportSurveyResponsesCsv,
   getChallengeLeaderboard,
   getSegmentAudienceSize,
   loadEngagementState,
+  loadNotificationCampaigns,
+  markNotificationCampaignCompleted,
   notificationTemplates,
-  saveEngagementState,
   type ChallengeDefinition,
   type EngagementSegment,
   type EngagementState,
@@ -74,8 +76,21 @@ export default function AdminEngagementPage() {
   const [referralItems, setReferralItems] = useState<ReferralRecord[]>([]);
 
   useEffect(() => {
-    saveEngagementState(state);
-  }, [state]);
+    let alive = true;
+    loadNotificationCampaigns()
+      .then((campaigns) => {
+        if (!alive) return;
+        setState((prev) => ({ ...prev, notificationCampaigns: campaigns }));
+      })
+      .catch(() => {
+        if (!alive) return;
+        setState((prev) => ({ ...prev, notificationCampaigns: [] }));
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -130,7 +145,6 @@ export default function AdminEngagementPage() {
         : getSegmentAudienceSize(campaignSegment, members);
 
     const nextCampaign = {
-      id: crypto.randomUUID(),
       name: campaignName,
       trigger: campaignTrigger,
       segment: campaignSegment,
@@ -145,40 +159,36 @@ export default function AdminEngagementPage() {
       winner: "Pending" as const,
     };
 
-    setState((prev) => ({
-      ...prev,
-      notificationCampaigns: [nextCampaign, ...prev.notificationCampaigns],
-    }));
-
     try {
+      const createdCampaign = await createNotificationCampaignRecord(nextCampaign);
+      setState((prev) => ({
+        ...prev,
+        notificationCampaigns: [createdCampaign, ...prev.notificationCampaigns],
+      }));
       await queueSmsNotification({
         subject: `${campaignName} (${campaignSegment})`,
         message: variantA,
       });
       toast.success("Push campaign scheduled and queued.");
     } catch {
-      toast.success("Push campaign saved locally for sprint demo.");
+      toast.error("Failed to schedule push campaign.");
     }
   };
 
-  const launchScheduledCampaign = (campaignId: string) => {
-    setState((prev) => ({
-      ...prev,
-      notificationCampaigns: prev.notificationCampaigns.map((item) => {
-        if (item.id !== campaignId) return item;
-        const deliveredCount = Math.max(1, Math.round(item.audienceSize * 0.94));
-        const openedCount = Math.max(1, Math.round(deliveredCount * 0.47));
-        return {
-          ...item,
-          status: "completed",
-          sentCount: item.audienceSize,
-          deliveredCount,
-          openedCount,
-          winner: openedCount / Math.max(deliveredCount, 1) > 0.4 ? "B" : "A",
-        };
-      }),
-    }));
-    toast.success("Campaign launched with delivery and open-rate tracking.");
+  const launchScheduledCampaign = async (campaignId: string) => {
+    const target = state.notificationCampaigns.find((item) => item.id === campaignId);
+    if (!target) return;
+
+    try {
+      const updated = await markNotificationCampaignCompleted(target);
+      setState((prev) => ({
+        ...prev,
+        notificationCampaigns: prev.notificationCampaigns.map((item) => (item.id === updated.id ? updated : item)),
+      }));
+      toast.success("Campaign launched with delivery and open-rate tracking.");
+    } catch {
+      toast.error("Failed to launch campaign.");
+    }
   };
 
   const addSurveyQuestion = () => {
@@ -495,6 +505,11 @@ export default function AdminEngagementPage() {
             </div>
 
             <div className="mt-6 space-y-4">
+              {state.notificationCampaigns.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-[#dbe7f3] bg-white p-6 text-sm text-gray-500">
+                  No campaigns yet
+                </div>
+              ) : null}
               {state.notificationCampaigns.map((campaign) => {
                 const campaignDelivery = campaign.sentCount ? (campaign.deliveredCount / campaign.sentCount) * 100 : 0;
                 const campaignOpen = campaign.sentCount ? (campaign.openedCount / campaign.sentCount) * 100 : 0;
