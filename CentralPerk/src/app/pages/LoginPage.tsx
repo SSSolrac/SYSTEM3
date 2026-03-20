@@ -33,20 +33,7 @@ export function LoginPage() {
           if (loginRole === 'admin') {
             setError('Invalid Admin ID or password. Please check your credentials and try again. Admin accounts must be created in Supabase with the email format: ADMINID@admin.loyaltyhub.com');
           } else {
-            const { data: existingProfile, error: profileLookupError } = await supabase
-              .from('loyalty_members')
-              .select('id')
-              .ilike('email', authEmail.trim())
-              .limit(1)
-              .maybeSingle();
-
-            if (profileLookupError) {
-              setError('Login failed. Please try again.');
-            } else if (!existingProfile) {
-              setError('No account found for that email. Please register first.');
-            } else {
-              setError('Incorrect password. Please try again.');
-            }
+            setError('Invalid email or password. Please check your credentials and try again.');
           }
         } else if (signInError.message.toLowerCase().includes('rate limit') || signInError.message.includes('over_')) {
           setError('Too many login attempts right now. Please wait a minute and try again.');

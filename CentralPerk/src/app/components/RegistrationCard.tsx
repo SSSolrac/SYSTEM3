@@ -17,7 +17,7 @@ interface Member {
   createdAt: string;
 }
 
-const AUTH_USER_EXISTS_HINTS = ['user already registered', 'already exists', 'already registered'];
+const AUTH_USER_EXISTS_HINTS = ['user already registered', 'already exists'];
 const AUTH_RATE_LIMIT_HINTS = ['over_email_send_rate_limit', 'rate limit', 'too many requests'];
 const PROFILE_CONSTRAINT_HINTS = ['duplicate key', 'already exists', 'violates unique constraint'];
 
@@ -79,21 +79,9 @@ export function RegistrationCard() {
   const buildReadableErrorMessage = (rawError: unknown) => {
     const errorText = extractErrorText(rawError);
     const normalizedErrorText = errorText.toLowerCase();
-    const errorStatus =
-      rawError && typeof rawError === 'object' && 'status' in rawError
-        ? Number((rawError as { status?: number }).status)
-        : null;
-
-    if (errorStatus === 429) {
-      return 'Too many attempts. Please wait before trying again.';
-    }
 
     if (hasAnyHint(normalizedErrorText, AUTH_RATE_LIMIT_HINTS)) {
-      return 'Too many attempts. Please wait before trying again.';
-    }
-
-    if (hasAnyHint(normalizedErrorText, AUTH_USER_EXISTS_HINTS)) {
-      return 'Account already exists. Please log in.';
+      return 'Too many registration attempts right now. Please wait a minute before trying again.';
     }
 
     if (errorText.includes('A user with that email and phone number already exists.')) {
@@ -162,22 +150,44 @@ export function RegistrationCard() {
         throw new Error(duplicateMessage);
       }
 
-      console.log('SIGNUP CALLED');
-      const { error: signUpError } = await supabase.auth.signUp({
+      // Check whether account already exists before attempting sign up.
+      const { data: existingSignInData, error: existingSignInError } = await supabase.auth.signInWithPassword({
         email: normalizedEmail,
         password: formData.password,
       });
 
+      if (existingSignInData?.session?.access_token) {
+        await supabase.auth.signOut();
+        throw new Error('Account already exists. Please log in.');
+      }
+
+      if (existingSignInError && existingSignInError.status === 429) {
+        throw new Error('Too many attempts. Please wait and try again.');
+      }
+
+      if (existingSignInError && existingSignInError.message.includes('Email not confirmed')) {
+        throw new Error('Account already exists. Please log in.');
+      }
+
+      console.log('SIGNUP CALLED');
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: normalizedEmail,
+        password: formData.password,
+        options: {
+          data: {
+            first_name: formData.firstName,
+            last_name: formData.lastName,
+            birthdate: formData.birthdate,
+          },
+        },
+      });
+
       if (signUpError) {
         const signUpErrorText = extractErrorText(signUpError).toLowerCase();
-        const signUpErrorStatus = Number((signUpError as { status?: number }).status ?? 0);
-
-        if (signUpErrorStatus === 429 || hasAnyHint(signUpErrorText, AUTH_RATE_LIMIT_HINTS)) {
-          throw new Error('Too many attempts. Please wait before trying again.');
-        }
-
         if (hasAnyHint(signUpErrorText, AUTH_USER_EXISTS_HINTS)) {
           authAlreadyExists = true;
+        } else if (hasAnyHint(signUpErrorText, AUTH_RATE_LIMIT_HINTS)) {
+          throw new Error('over_email_send_rate_limit');
         } else {
           throw signUpError;
         }
@@ -212,11 +222,25 @@ export function RegistrationCard() {
         throw new Error('PROFILE_CREATION_FAILED');
       }
 
+      if (authAlreadyExists) {
+        setMessage({
+          type: 'success',
+          text: 'Existing account recovered and profile setup is now complete. You can now log in.',
+        });
+      } else {
+        setMessage({
+          type: 'success',
+          text: 'Registration successful! Welcome to our loyalty program. You can now log in.',
+        });
+      }
+
+      if (!newMember) {
+        throw new Error('PROFILE_CREATION_FAILED');
+      }
+
       setMessage({
         type: 'success',
-        text: authAlreadyExists
-          ? 'Account already existed. Your profile is now complete, and you can log in.'
-          : 'Registration successful! Welcome to our loyalty program. You can now log in.',
+        text: 'Registration successful! Welcome to our loyalty program. You can now log in.',
       });
 
       const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
@@ -225,7 +249,9 @@ export function RegistrationCard() {
       if (welcomeResult.granted) {
         setMessage({
           type: 'success',
-          text: 'Registration successful! Welcome package applied. You can now log in.',
+          text: authAlreadyExists
+            ? 'Existing account recovered and welcome package applied. You can now log in.'
+            : 'Registration successful! Welcome package applied. You can now log in.',
         });
       }
 
