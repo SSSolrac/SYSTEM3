@@ -14,6 +14,7 @@ export function LoginPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setIsSubmitting(true);
     setError(null);
 
@@ -28,14 +29,29 @@ export function LoginPage() {
       });
 
       if (signInError) {
-        if (signInError.message.includes('Email not confirmed')) {
-          setError('Please check your email and click the confirmation link before logging in. Check your spam folder if you don\'t see it.');
-        } else if (signInError.message.includes('Invalid login credentials')) {
+        if (signInError.message.includes('Invalid login credentials')) {
           if (loginRole === 'admin') {
             setError('Invalid Admin ID or password. Please check your credentials and try again. Admin accounts must be created in Supabase with the email format: ADMINID@admin.loyaltyhub.com');
           } else {
-            setError('Invalid email or password. Please check your credentials and try again. If you don\'t have an account, register first.');
+            const { data: existingProfile, error: profileLookupError } = await supabase
+              .from('loyalty_members')
+              .select('id')
+              .ilike('email', authEmail.trim())
+              .limit(1)
+              .maybeSingle();
+
+            if (profileLookupError) {
+              setError('Login failed. Please try again.');
+            } else if (!existingProfile) {
+              setError('No account found for that email. Please register first.');
+            } else {
+              setError('Incorrect password. Please try again.');
+            }
           }
+        } else if (signInError.message.toLowerCase().includes('rate limit') || signInError.message.includes('over_')) {
+          setError('Too many login attempts right now. Please wait a minute and try again.');
+        } else if (signInError.message.includes('Email not confirmed')) {
+          setError('This account still requires email confirmation in Auth settings. Please contact support.');
         } else {
           throw signInError;
         }
@@ -52,11 +68,15 @@ export function LoginPage() {
         if (!resolvedRole || resolvedRole !== loginRole) {
           await supabase.auth.signOut();
           clearStoredAuth();
-          setError(
-            loginRole === 'admin'
-              ? 'This account is not authorized for Admin access.'
-              : 'This account is not authorized for Customer access.'
-          );
+          if (!resolvedRole && loginRole === 'customer') {
+            setError('Your Auth account exists, but your loyalty profile is not set up yet. Please complete registration or contact support.');
+          } else {
+            setError(
+              loginRole === 'admin'
+                ? 'This account is not authorized for Admin access.'
+                : 'This account is not authorized for Customer access.'
+            );
+          }
           setIsSubmitting(false);
           return;
         }

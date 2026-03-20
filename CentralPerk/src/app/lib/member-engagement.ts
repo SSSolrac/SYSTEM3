@@ -1,7 +1,6 @@
 import type { MemberData } from "../types/loyalty";
 import type { LoyaltyTransaction, Member, MemberLoginActivity } from "../admin-panel/types";
-
-const STORAGE_KEY = "centralperk-member-engagement-v1";
+import { supabase } from "../../utils/supabase/client";
 
 export type EngagementSegment =
   | "All Members"
@@ -239,210 +238,118 @@ export const notificationTemplates: NotificationTemplate[] = [
   },
 ];
 
-function formatInputDate(value: Date) {
-  return `${value.getFullYear()}-${`${value.getMonth() + 1}`.padStart(2, "0")}-${`${value.getDate()}`.padStart(2, "0")}`;
-}
-
-function startOfWeek(date: Date) {
-  const next = new Date(date);
-  const day = next.getDay();
-  const diff = (day + 6) % 7;
-  next.setDate(next.getDate() - diff);
-  next.setHours(0, 0, 0, 0);
-  return next;
-}
-
 function safeWindow() {
   return typeof window === "undefined" ? null : window;
 }
 
-function buildDefaultState(): EngagementState {
-  const now = new Date();
-  const weekStart = startOfWeek(now);
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-
+function createEmptyState(): EngagementState {
   return {
-    notificationCampaigns: [
-      {
-        id: "notif-1",
-        name: "Weekend Double Points",
-        trigger: "Flash Sale",
-        segment: "Gold",
-        scheduledFor: new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString(),
-        status: "scheduled",
-        audienceSize: 128,
-        sentCount: 0,
-        deliveredCount: 0,
-        openedCount: 0,
-        variantA: "Double points starts at 6 PM. Swipe in early.",
-        variantB: "Gold members get first access to double points tonight.",
-        winner: "Pending",
-      },
-      {
-        id: "notif-2",
-        name: "Reward Ready Reminder",
-        trigger: "Reward Available",
-        segment: "High Value",
-        scheduledFor: new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString(),
-        status: "completed",
-        audienceSize: 84,
-        sentCount: 84,
-        deliveredCount: 80,
-        openedCount: 41,
-        variantA: "A featured reward is ready in your account.",
-        variantB: "You have enough points for this week’s featured reward.",
-        winner: "B",
-      },
-    ],
-    challenges: [
-      {
-        id: "challenge-1",
-        title: "Make 3 purchases this week",
-        description: "Complete three purchases before the week ends to unlock a bonus.",
-        type: "purchase-count",
-        targetValue: 3,
-        unitLabel: "purchases",
-        startAt: weekStart.toISOString(),
-        endAt: new Date(weekStart.getTime() + 6 * 24 * 60 * 60 * 1000).toISOString(),
-        rewardPoints: 150,
-        rewardBadge: "Weekly Streak",
-        competitive: true,
-        segment: "All Members",
-      },
-      {
-        id: "challenge-2",
-        title: "Earn 1000 points this month",
-        description: "Stay active and reach one thousand earned points before month-end.",
-        type: "points-earned",
-        targetValue: 1000,
-        unitLabel: "points",
-        startAt: monthStart.toISOString(),
-        endAt: monthEnd.toISOString(),
-        rewardPoints: 250,
-        rewardBadge: "Momentum Builder",
-        competitive: false,
-        segment: "All Members",
-      },
-      {
-        id: "challenge-3",
-        title: "Complete 2 surveys this month",
-        description: "Share feedback twice this month to earn extra loyalty points.",
-        type: "survey-completion",
-        targetValue: 2,
-        unitLabel: "surveys",
-        startAt: monthStart.toISOString(),
-        endAt: monthEnd.toISOString(),
-        rewardPoints: 100,
-        rewardBadge: "Voice of the Member",
-        competitive: false,
-        segment: "Silver",
-      },
-    ],
-    surveys: [
-      {
-        id: "survey-1",
-        title: "March Experience Pulse",
-        description: "Help us improve rewards, notifications, and member-exclusive offers.",
-        segment: "All Members",
-        bonusPoints: 50,
-        status: "live",
-        createdAt: now.toISOString(),
-        questions: [
-          {
-            id: "q1",
-            prompt: "How satisfied are you with your rewards experience this month?",
-            type: "rating",
-          },
-          {
-            id: "q2",
-            prompt: "Which perk motivates you most right now?",
-            type: "multiple-choice",
-            options: ["Bonus points", "Tier upgrades", "Flash sales", "Member challenges"],
-          },
-          {
-            id: "q3",
-            prompt: "What should we improve next?",
-            type: "free-text",
-          },
-        ],
-        responses: [],
-      },
-    ],
-    shareEvents: [
-      {
-        id: "share-1",
-        memberId: "M-1007",
-        memberName: "Sofia Lee",
-        tier: "Gold",
-        channel: "facebook",
-        achievement: "Gold tier upgrade",
-        referralCode: "SOFIA-GOLD",
-        conversions: 3,
-        createdAt: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString(),
-      },
-      {
-        id: "share-2",
-        memberId: "M-1012",
-        memberName: "Kai Martin",
-        tier: "Silver",
-        channel: "instagram",
-        achievement: "Weekly Streak badge",
-        referralCode: "KAI-WIN",
-        conversions: 1,
-        createdAt: new Date(now.getTime() - 12 * 60 * 60 * 1000).toISOString(),
-      },
-    ],
-    winBackCampaigns: [
-      {
-        id: "winback-1",
-        name: "Inactive Gold Rescue",
-        segment: "Inactive 60+ Days",
-        offerType: "2x Points",
-        offerValue: "2x points on the next purchase",
-        status: "running",
-        targetedMembers: 42,
-        responses: 14,
-        reengagedMembers: 8,
-        estimatedRevenue: 18600,
-        offerCost: 4300,
-        launchDate: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-      },
-    ],
+    notificationCampaigns: [],
+    challenges: [],
+    surveys: [],
+    shareEvents: [],
+    winBackCampaigns: [],
     claimedChallengeRewardsByMember: {},
     privacySettingsByMember: {},
   };
 }
 
 export function loadEngagementState(): EngagementState {
-  const browser = safeWindow();
-  if (!browser) return buildDefaultState();
-
-  try {
-    const raw = browser.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return buildDefaultState();
-
-    const parsed = JSON.parse(raw) as Partial<EngagementState>;
-    return {
-      ...buildDefaultState(),
-      ...parsed,
-      notificationCampaigns: parsed.notificationCampaigns ?? buildDefaultState().notificationCampaigns,
-      challenges: parsed.challenges ?? buildDefaultState().challenges,
-      surveys: parsed.surveys ?? buildDefaultState().surveys,
-      shareEvents: parsed.shareEvents ?? buildDefaultState().shareEvents,
-      winBackCampaigns: parsed.winBackCampaigns ?? buildDefaultState().winBackCampaigns,
-      claimedChallengeRewardsByMember: parsed.claimedChallengeRewardsByMember ?? {},
-      privacySettingsByMember: parsed.privacySettingsByMember ?? {},
-    };
-  } catch {
-    return buildDefaultState();
-  }
+  return createEmptyState();
 }
 
-export function saveEngagementState(state: EngagementState) {
-  const browser = safeWindow();
-  if (!browser) return;
-  browser.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+export function saveEngagementState(_state: EngagementState) {
+  // Deprecated: engagement data is no longer persisted in browser localStorage.
+}
+
+type NotificationCampaignRow = {
+  id: string;
+  name: string;
+  trigger: NotificationTrigger;
+  segment: EngagementSegment;
+  scheduled_for: string;
+  status: "scheduled" | "live" | "completed";
+  audience_size: number | null;
+  sent_count: number | null;
+  delivered_count: number | null;
+  opened_count: number | null;
+  variant_a: string | null;
+  variant_b: string | null;
+  winner: "A" | "B" | "Pending" | null;
+};
+
+function mapNotificationCampaign(row: NotificationCampaignRow): NotificationCampaign {
+  return {
+    id: row.id,
+    name: row.name,
+    trigger: row.trigger,
+    segment: row.segment,
+    scheduledFor: row.scheduled_for,
+    status: row.status,
+    audienceSize: Number(row.audience_size ?? 0),
+    sentCount: Number(row.sent_count ?? 0),
+    deliveredCount: Number(row.delivered_count ?? 0),
+    openedCount: Number(row.opened_count ?? 0),
+    variantA: String(row.variant_a ?? ""),
+    variantB: String(row.variant_b ?? ""),
+    winner: row.winner ?? "Pending",
+  };
+}
+
+export async function loadNotificationCampaigns() {
+  const { data, error } = await supabase
+    .from("notification_campaigns")
+    .select("id,name,trigger,segment,scheduled_for,status,audience_size,sent_count,delivered_count,opened_count,variant_a,variant_b,winner")
+    .order("scheduled_for", { ascending: false });
+
+  if (error) throw error;
+  return ((data ?? []) as NotificationCampaignRow[]).map(mapNotificationCampaign);
+}
+
+export async function createNotificationCampaignRecord(input: Omit<NotificationCampaign, "id">) {
+  const { data, error } = await supabase
+    .from("notification_campaigns")
+    .insert({
+      name: input.name,
+      trigger: input.trigger,
+      segment: input.segment,
+      scheduled_for: input.scheduledFor,
+      status: input.status,
+      audience_size: input.audienceSize,
+      sent_count: input.sentCount,
+      delivered_count: input.deliveredCount,
+      opened_count: input.openedCount,
+      variant_a: input.variantA,
+      variant_b: input.variantB,
+      winner: input.winner,
+    })
+    .select("id,name,trigger,segment,scheduled_for,status,audience_size,sent_count,delivered_count,opened_count,variant_a,variant_b,winner")
+    .single();
+
+  if (error) throw error;
+  return mapNotificationCampaign(data as NotificationCampaignRow);
+}
+
+export async function markNotificationCampaignCompleted(campaign: NotificationCampaign) {
+  const deliveredCount = Math.max(1, Math.round(campaign.audienceSize * 0.94));
+  const openedCount = Math.max(1, Math.round(deliveredCount * 0.47));
+  const winner: "A" | "B" = openedCount / Math.max(deliveredCount, 1) > 0.4 ? "B" : "A";
+
+  const { data, error } = await supabase
+    .from("notification_campaigns")
+    .update({
+      status: "completed",
+      sent_count: campaign.audienceSize,
+      delivered_count: deliveredCount,
+      opened_count: openedCount,
+      winner,
+    })
+    .eq("id", campaign.id)
+    .select("id,name,trigger,segment,scheduled_for,status,audience_size,sent_count,delivered_count,opened_count,variant_a,variant_b,winner")
+    .single();
+
+  if (error) throw error;
+  return mapNotificationCampaign(data as NotificationCampaignRow);
 }
 
 export function getMemberPrivacySettings(state: EngagementState, memberId: string): SharePrivacySettings {

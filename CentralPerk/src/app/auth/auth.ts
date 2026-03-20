@@ -24,8 +24,9 @@ export function clearStoredAuth() {
   localStorage.removeItem(CUSTOMER_DASHBOARD_USER_KEY);
 }
 
-function inferRoleFromEmail(email?: string | null): Role {
-  return email?.endsWith(ADMIN_SUFFIX) ? "admin" : "customer";
+function inferRoleFromEmail(email?: string | null): Role | null {
+  if (!email) return null;
+  return email.endsWith(ADMIN_SUFFIX) ? "admin" : null;
 }
 
 function normalizeRole(raw: unknown): Role | null {
@@ -122,6 +123,7 @@ export async function getRoleFromSession(): Promise<Role | null> {
   const dbRole = await getRoleFromDb(session.user?.email);
   if (dbRole) return dbRole;
 
-  // Legacy fallback to keep existing admin accounts working.
+  // Legacy fallback to keep existing admin accounts working without
+  // accidentally treating profile-less customer accounts as valid.
   return inferRoleFromEmail(session.user?.email);
 }
