@@ -4,6 +4,7 @@ import { supabase } from '../../utils/supabase/client';
 import { clearStoredAuth, getRoleFromSession } from '../auth/auth';
 import { trackMemberLoginActivity } from '../lib/loyalty-supabase';
 import { AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT } from '../auth/auth-config';
+import { isDemoEmail, loginCustomer, mapAuthErrorToMessage } from '../auth/customer-auth';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
@@ -36,54 +37,15 @@ export function LoginPage() {
 
     try {
       const normalizedCustomerEmail = normalizeEmail(email);
-      const normalizedAdminId = email.trim();
-      const authEmail = loginRole === 'admin'
-        ? `${normalizedAdminId}@admin.loyaltyhub.com`
-        : normalizedCustomerEmail;
+      const loginResult = await loginCustomer({ email, password, role: loginRole });
+      const authEmail = loginRole === 'admin' ? `${email.trim()}@admin.loyaltyhub.com` : normalizedCustomerEmail;
 
-      const { data, error: signInError } = await supabase.auth.signInWithPassword({
-        email: authEmail,
-        password,
-      });
-
-      if (signInError) {
-        const signInCode = String(signInError.code ?? '').toLowerCase();
-        const signInMessage = signInError.message.toLowerCase();
-        const isEmailNotConfirmedError =
-          signInCode === 'email_not_confirmed' || signInMessage.includes('email not confirmed');
-        const isInvalidCredentialsError = signInMessage.includes('invalid login credentials');
-        const isRateLimited = signInMessage.includes('rate limit') || signInMessage.includes('over_');
-
-        if (isEmailNotConfirmedError) {
-          setError(
-            AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT
-              ? 'Email confirmation is still required for this account. Confirm your email, then try signing in again.'
-              : 'Email confirmation is still required for this account. Please check your email and confirm the account before signing in.'
-          );
-        } else if (isInvalidCredentialsError) {
-          if (loginRole === 'admin') {
-            setError('Invalid Admin ID or password. Please check your credentials and try again. Admin accounts must be created in Supabase with the email format: ADMINID@admin.loyaltyhub.com');
-          } else {
-            const hasMatchingProfile = await profileExistsForEmail(normalizedCustomerEmail);
-            setError(
-              hasMatchingProfile
-                ? 'We found your loyalty profile, but this sign-in failed. Your account may still need email confirmation, or this email already existed with a different password. Try confirming your email or resetting your password.'
-                : 'Invalid email or password. Please check your credentials and try again.'
-            );
-          }
-        } else if (isRateLimited) {
-          setError('Too many login attempts right now. Please wait a minute and try again.');
-        } else {
-          throw signInError;
+      if (loginResult.accessToken) {
+        if (loginResult.authMode === 'supabase') {
+          clearStoredAuth();
         }
-        setIsSubmitting(false);
-        return;
-      }
-
-      if (data?.session?.access_token) {
-        clearStoredAuth();
-        localStorage.setItem('token', data.session.access_token);
-        localStorage.setItem('user_id', data.user?.id ?? '');
+        localStorage.setItem('token', loginResult.accessToken);
+        localStorage.setItem('user_id', loginResult.userId ?? '');
 
         const resolvedRole = await getRoleFromSession();
         if (!resolvedRole || resolvedRole !== loginRole) {
@@ -117,7 +79,32 @@ export function LoginPage() {
         navigate('/', { replace: true });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unexpected error occurred. Please try again.');
+      if (loginRole === 'admin') {
+        const message = mapAuthErrorToMessage(err);
+        if (message.includes('Email confirmation is still required')) {
+          setError(
+            AUTH_REQUIRE_EMAIL_CONFIRMATION_HINT
+              ? 'Email confirmation is still required for this account. Confirm your email, then try signing in again.'
+              : 'Email confirmation is still required for this account. Please check your email and confirm the account before signing in.'
+          );
+        } else if (message.toLowerCase().includes('rate limit')) {
+          setError(message);
+        } else {
+          setError('Invalid Admin ID or password. Please check your credentials and try again. Admin accounts must be created in Supabase with the email format: ADMINID@admin.loyaltyhub.com');
+        }
+      } else {
+        const mappedError = mapAuthErrorToMessage(err);
+        if (mappedError.includes('Invalid email or password')) {
+          const hasMatchingProfile = await profileExistsForEmail(normalizeEmail(email));
+          setError(
+            hasMatchingProfile
+              ? 'We found your loyalty profile, but this sign-in failed. Your account may still need email confirmation, or this email already existed with a different password.'
+              : mappedError
+          );
+        } else {
+          setError(mappedError);
+        }
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -225,6 +212,11 @@ export function LoginPage() {
                     placeholder={loginRole === 'admin' ? 'e.g., ADMIN0001' : 'your.email@example.com'}
                     required
                   />
+                  {loginRole === 'customer' && email && isDemoEmail(email) && (
+                    <p className="mt-2 text-xs text-[#1A2B47]">
+                      Demo/test email detected. Login will use Development Demo Auth first if a demo account exists.
+                    </p>
+                  )}
                 </div>
 
                 <div>
