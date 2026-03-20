@@ -172,6 +172,27 @@ async function grantWelcomePackageForMember(member: AnyRecord, memberPk: { key: 
   return { granted: true, pointsAdded: WELCOME_PACKAGE_POINTS, newBalance, newTier };
 }
 
+async function readMemberBalanceSnapshot(
+  memberPk: { key: string; value: any },
+  fallbackBalance = 0
+): Promise<{ newBalance: number; newTier: SupportedTier }> {
+  const rules = await fetchTierRules();
+  const refreshedMemberRes = await supabase
+    .from("loyalty_members")
+    .select("points_balance,tier")
+    .eq(memberPk.key, memberPk.value)
+    .limit(1)
+    .maybeSingle();
+  if (refreshedMemberRes.error) throw refreshedMemberRes.error;
+
+  const newBalance = sanitizePointsBalance(refreshedMemberRes.data?.points_balance ?? fallbackBalance);
+  const newTier = normalizeTierLabel(
+    String(refreshedMemberRes.data?.tier ?? resolveTier(newBalance, rules))
+  ) as SupportedTier;
+
+  return { newBalance, newTier };
+}
+
 async function processMemberExpiredPoints(memberPk: { key: string; value: any }) {
   const txQuery = await supabase
     .from("loyalty_transactions")
@@ -201,23 +222,13 @@ async function processMemberExpiredPoints(memberPk: { key: string; value: any })
     .maybeSingle();
   if (memberErr) throw memberErr;
 
-  const rules = await fetchTierRules();
-  const currentBalance = sanitizePointsBalance(memberNow?.points_balance ?? 0);
-  const newBalance = Math.max(0, currentBalance - totalExpired);
-  const newTier = resolveTier(newBalance, rules);
-
   await insertLoyaltyTransaction({
     member_id: memberPk.value,
     transaction_type: "EXPIRY_DEDUCTION",
     points: -Math.abs(totalExpired),
     reason: "Points Expired",
   });
-
-  const updateRes = await supabase
-    .from("loyalty_members")
-    .update({ points_balance: newBalance, tier: newTier })
-    .eq(memberPk.key, memberPk.value);
-  if (updateRes.error) throw updateRes.error;
+  await readMemberBalanceSnapshot(memberPk, memberNow?.points_balance ?? 0);
 }
 
 export async function processAllMemberExpiredPoints() {
@@ -631,16 +642,12 @@ export async function awardMemberPoints(input: {
   const pk = getMemberPk(member);
   if (!pk) throw new Error("Member primary key is missing.");
 
-  const rules = await fetchTierRules();
-  const currentBalance = sanitizePointsBalance(member.points_balance ?? 0);
   let pointsToAdd = Math.max(0, Math.floor(input.points));
   const memberTier = normalizeTierLabel(String(member.tier || "Bronze")) as SupportedTier;
   if (input.transactionType === "PURCHASE") {
     const purchaseAmount = Number(input.amountSpent || 0);
     pointsToAdd = await calculateDynamicPurchasePoints({ amountSpent: purchaseAmount, tier: memberTier });
   }
-  const newBalance = currentBalance + pointsToAdd;
-  const newTier = resolveTier(newBalance, rules);
 
   const txPayload: AnyRecord = {
     member_id: pk.value,
@@ -654,12 +661,7 @@ export async function awardMemberPoints(input: {
   }
 
   await insertLoyaltyTransaction(txPayload);
-
-  const updateRes = await supabase
-    .from("loyalty_members")
-    .update({ points_balance: newBalance, tier: newTier })
-    .eq(pk.key, pk.value);
-  if (updateRes.error) throw updateRes.error;
+  const { newBalance, newTier } = await readMemberBalanceSnapshot(pk, member.points_balance ?? 0);
 
   return { newBalance, newTier, pointsAdded: pointsToAdd };
 }
@@ -676,13 +678,9 @@ export async function redeemMemberPoints(input: {
   const pk = getMemberPk(member);
   if (!pk) throw new Error("Member primary key is missing.");
 
-  const rules = await fetchTierRules();
   const currentBalance = sanitizePointsBalance(member.points_balance ?? 0);
   const pointsToDeduct = Math.max(0, Math.floor(input.points));
   if (pointsToDeduct > currentBalance) throw new Error("Not enough points.");
-
-  const newBalance = Math.max(0, currentBalance - pointsToDeduct);
-  const newTier = resolveTier(newBalance, rules);
 
   await insertLoyaltyTransaction({
     member_id: pk.value,
@@ -696,12 +694,7 @@ export async function redeemMemberPoints(input: {
     p_points_to_consume: pointsToDeduct,
   });
   if (fifoConsume.error) throw fifoConsume.error;
-
-  const updateRes = await supabase
-    .from("loyalty_members")
-    .update({ points_balance: newBalance, tier: newTier })
-    .eq(pk.key, pk.value);
-  if (updateRes.error) throw updateRes.error;
+  const { newBalance, newTier } = await readMemberBalanceSnapshot(pk, currentBalance);
 
   return { newBalance, newTier, pointsDeducted: pointsToDeduct };
 }

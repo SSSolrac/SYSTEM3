@@ -19,7 +19,10 @@ interface Member {
 }
 
 const AUTH_RATE_LIMIT_HINTS = ['over_email_send_rate_limit', 'rate limit', 'too many requests'];
+const AUTH_ALREADY_EXISTS_HINTS = ['user already registered', 'already registered', 'already exists', 'user exists'];
 const PROFILE_CONSTRAINT_HINTS = ['duplicate key', 'already exists', 'violates unique constraint'];
+const PARTIAL_SUCCESS_NOTICE =
+  'Your account may already have been created. Please check your email for a confirmation link, or try signing in after confirming your email.';
 
 export function RegistrationCard() {
   const [formData, setFormData] = useState({
@@ -56,22 +59,6 @@ export function RegistrationCard() {
       ...formData,
       [e.target.name]: e.target.value,
     });
-  };
-
-  const getDuplicateMessage = (emailExists: boolean, phoneExists: boolean) => {
-    if (emailExists && phoneExists) {
-      return 'A user with that email and phone number already exists.';
-    }
-
-    if (emailExists) {
-      return 'Duplicate email.';
-    }
-
-    if (phoneExists) {
-      return 'Duplicate number.';
-    }
-
-    return null;
   };
 
   const extractErrorText = (rawError: unknown) => {
@@ -155,8 +142,11 @@ export function RegistrationCard() {
     setMessage(null);
     setRegisteredMember(null);
 
+    let authSignupLikelyCompleted = false;
+    let normalizedEmail = '';
+
     try {
-      const normalizedEmail = formData.email.trim().toLowerCase();
+      normalizedEmail = formData.email.trim().toLowerCase();
       const normalizedPhone = formData.phone.trim();
       // Pre-check email and phone before auth signup to prevent duplicate registrations.
       const { data: existingMembers, error: existingMembersError } = await supabase
@@ -266,16 +256,6 @@ export function RegistrationCard() {
         createdAt: newMember.enrollment_date,
       });
 
-      if (welcomeResult.granted) {
-        localStorage.setItem(
-          WELCOME_NOTICE_STORAGE_KEY,
-          JSON.stringify({
-            memberNumber: newMember.member_number,
-            grantedAt: new Date().toISOString(),
-          })
-        );
-      }
-
       // Reset form
       setFormData({
         firstName: '',
@@ -301,8 +281,10 @@ export function RegistrationCard() {
       }
 
       setMessage({
-        type: 'error',
-        text: buildReadableErrorMessage(error),
+        type: isPartialSuccess ? 'success' : 'error',
+        text: isPartialSuccess
+          ? `${PARTIAL_SUCCESS_NOTICE} ${buildReadableErrorMessage(error)}`
+          : buildReadableErrorMessage(error),
       });
     } finally {
       setIsSubmitting(false);
