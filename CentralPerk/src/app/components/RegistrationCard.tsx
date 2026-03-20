@@ -150,7 +150,26 @@ export function RegistrationCard() {
         throw new Error(duplicateMessage);
       }
 
-      // Create auth user after pre-check succeeds.
+      // Check whether account already exists before attempting sign up.
+      const { data: existingSignInData, error: existingSignInError } = await supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password: formData.password,
+      });
+
+      if (existingSignInData?.session?.access_token) {
+        await supabase.auth.signOut();
+        throw new Error('Account already exists. Please log in.');
+      }
+
+      if (existingSignInError && existingSignInError.status === 429) {
+        throw new Error('Too many attempts. Please wait and try again.');
+      }
+
+      if (existingSignInError && existingSignInError.message.includes('Email not confirmed')) {
+        throw new Error('Account already exists. Please log in.');
+      }
+
+      console.log('SIGNUP CALLED');
       const { error: signUpError } = await supabase.auth.signUp({
         email: normalizedEmail,
         password: formData.password,
@@ -214,6 +233,15 @@ export function RegistrationCard() {
           text: 'Registration successful! Welcome to our loyalty program. You can now log in.',
         });
       }
+
+      if (!newMember) {
+        throw new Error('PROFILE_CREATION_FAILED');
+      }
+
+      setMessage({
+        type: 'success',
+        text: 'Registration successful! Welcome to our loyalty program. You can now log in.',
+      });
 
       const welcomeResult = await ensureWelcomePackage(newMember.member_number, newMember.email);
       const memberPointsBalance = Number(welcomeResult.newBalance ?? newMember.points_balance ?? 0);
